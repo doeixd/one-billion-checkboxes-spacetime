@@ -93,6 +93,15 @@ function App() {
           >
             Powered by SpacetimeDB
           </a>
+          <div style={{ marginLeft: 'auto' }}>
+            source code on{' '}
+            <a
+              href="https://github.com/gillkyle/one-million-checkboxes-spacetime"
+              target="_blank"
+            >
+              GitHub
+            </a>
+          </div>
         </div>
       </div>
       <div style={{ width: '100%', height: '100%', flexGrow: 1 }} ref={ref}>
