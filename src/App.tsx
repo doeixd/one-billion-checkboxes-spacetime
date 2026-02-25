@@ -88,7 +88,7 @@ function App() {
               textDecoration: 'none',
               color: 'black',
             }}
-            href="https://spacetimedb.com"
+            href="https://spacetimedb.com/?referral=gillkyle"
             target="_blank"
           >
             Powered by SpacetimeDB
