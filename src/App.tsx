@@ -1,3 +1,20 @@
+/**
+ * Main UI — renders a virtual grid of 1,000,000 checkboxes.
+ *
+ * Data model:
+ *   1M checkboxes are stored across 250 database rows ("documents").
+ *   Each document holds 4,000 checkboxes as a bit-packed byte array (500 bytes).
+ *   Checkbox N maps to: documentIdx = N % 250, arrayIdx = floor(N / 250).
+ *
+ * Real-time updates:
+ *   useTable(tables.checkboxes) subscribes to all 250 rows over a single
+ *   WebSocket. When any row changes (from this client or another), SpacetimeDB
+ *   pushes the update and React re-renders the affected cells.
+ *
+ * Virtual scrolling:
+ *   react-window's Grid only mounts the checkboxes visible in the viewport,
+ *   so the DOM stays small even with 1M items.
+ */
 import { Grid } from 'react-window';
 import { useMemo } from 'react';
 import { useMeasure } from 'react-use';
@@ -7,12 +24,14 @@ import { useTable, useReducer, useSpacetimeDB } from 'spacetimedb/react';
 const NUM_BOXES = 1_000_000;
 const NUM_DOCUMENTS = 250;
 
+/** Check if a specific bit is set in a byte array. */
 function isChecked(boxes: number[], arrayIdx: number): boolean {
   const bit = arrayIdx % 8;
   const byteIdx = Math.floor(arrayIdx / 8);
   return !!((1 << bit) & (boxes[byteIdx] || 0));
 }
 
+/** Props passed from the Grid to every Cell via cellProps. */
 type CellCustomProps = {
   boxesMap: Map<number, number[]>;
   numColumns: number;
@@ -24,10 +43,12 @@ function App() {
   const conn = useSpacetimeDB();
   const { isActive: connected } = conn;
 
+  // Subscribe to the checkboxes table — returns all 250 rows in real-time
   const [checkboxRows, isTableLoading] = useTable(tables.checkboxes);
+  // Get a callable handle to the server's toggle reducer
   const toggleReducer = useReducer(reducers.toggle);
 
-  // Build a map from idx to boxes for efficient lookup
+  // Index rows by document idx for O(1) lookup in each Cell render
   const boxesMap = useMemo(() => {
     const map = new Map<number, number[]>();
     for (const row of checkboxRows) {
@@ -36,7 +57,7 @@ function App() {
     return map;
   }, [checkboxRows]);
 
-  // Count checked boxes
+  // Popcount across all documents to display total checked
   const numCheckedBoxes = useMemo(() => {
     let count = 0;
     for (const boxes of boxesMap.values()) {
@@ -51,12 +72,14 @@ function App() {
     return count;
   }, [boxesMap]);
 
+  // Measure the container so we can calculate how many columns fit
   const [ref, { width, height }] = useMeasure<HTMLDivElement>();
   const numColumns = Math.ceil((width - 40) / 30);
   const numRows = Math.ceil(NUM_BOXES / numColumns);
 
   const loading = isTableLoading || !connected;
 
+  // Memoize cellProps so the Grid only re-renders cells when data changes
   const cellProps: CellCustomProps = useMemo(
     () => ({ boxesMap, numColumns, toggleReducer, loading }),
     [boxesMap, numColumns, toggleReducer, loading]
@@ -119,6 +142,13 @@ function App() {
   );
 }
 
+/**
+ * A single checkbox cell rendered by react-window.
+ *
+ * Converts the grid position (row, column) back to a flat index, then maps
+ * that to a (documentIdx, arrayIdx) pair to look up the bit from the
+ * in-memory boxesMap. Clicking calls the server's toggle reducer.
+ */
 const Cell = ({
   style,
   rowIndex,
@@ -133,10 +163,14 @@ const Cell = ({
   rowIndex: number;
   columnIndex: number;
 } & CellCustomProps) => {
+  // Flat index in the 0..999,999 range
   const index = rowIndex * numColumns + columnIndex;
 
   if (index >= NUM_BOXES) return null;
 
+  // Reverse the mapping: checkboxes are striped across documents so that
+  // adjacent checkboxes on screen live in different rows, spreading write
+  // contention evenly across all 250 documents.
   const documentIdx = index % NUM_DOCUMENTS;
   const arrayIdx = Math.floor(index / NUM_DOCUMENTS);
 
