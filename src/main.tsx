@@ -40,6 +40,7 @@ const onConnectError = (_ctx: ErrorContext, err: Error) => {
 const connectionBuilder = DbConnection.builder()
   .withUri(HOST)
   .withDatabaseName(DB_NAME)
+  .withConfirmedReads(false)
   .withToken(localStorage.getItem(TOKEN_KEY) || undefined)
   .onConnect(onConnect)
   .onDisconnect(onDisconnect)
