@@ -20,5 +20,6 @@
     "typescript": "~5.6.2",
     "vite": "^7.1.5",
     "vite-plugin-solid": "next"
-  }
+  },
+  "packageManager": "npm@11.12.0"
 }

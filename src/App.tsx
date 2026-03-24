@@ -1,42 +1,16 @@
 /**
- * Main UI — renders a virtual grid of 1,000,000,000 checkboxes.
+ * Main UI — renders a virtual grid of 1,000,000,000 checkboxes via canvas.
  *
  * Data model:
- *   Same as before: 1B checkboxes across 250,000 DB rows ("documents").
+ *   1B checkboxes across 250,000 DB rows ("documents").
  *   Each document holds 4,000 checkboxes packed as nibbles (4 bits, 2 per byte).
  *   Nibble 0 = unchecked; 1-15 = color index. Missing rows are all-zero.
  *   Checkbox N maps to: documentIdx = N % 250000, arrayIdx = floor(N / 250000).
  *
- * SolidJS 2.0 patterns used:
- *   • createSignal / createMemo          — reactive state and derived values
- *   • onSettled (replaces onMount)        — one-time side-effect setup after mount
- *   • onCleanup                           — cleanup on unmount
- *   • createEffect(computeFn, applyFn)    — two-phase effect (2.0 change):
- *       Phase 1 "compute" runs in tracking context and returns a value.
- *       Phase 2 "apply" receives that value and performs the side effect
- *       outside any reactive tracking context, preventing infinite loops.
- *   • <For> with keyed={false}            — replaces <Index> from 1.x
- *   • Optimistic updates via pendingUpdates signal — applied on top of the
- *       server-confirmed boxesMap; cleared when SpacetimeDB confirms each row.
- *   • createMemo(async fn)               — SolidJS 2.0 native async memo; no
- *       createAsync wrapper needed. Returning a Promise from createMemo marks the
- *       computation as async. The reactivity system tracks its pending state so
- *       isPending() and <Loading> work automatically.
- *   • isPending(() => expr)              — returns true while any async memo
- *       inside the thunk is still resolving. Read OUTSIDE a Loading/Suspense
- *       boundary so this component itself does not suspend.
- *   • <Loading on={memo} fallback={…}>   — shows fallback only on initial load;
- *       subsequent background refreshes keep the old UI visible and instead
- *       make isPending() return true inside. <Suspense> is fully removed in
- *       SolidJS 2.0; <Loading> is its replacement. The `on` prop explicitly
- *       binds the async dependency to watch.
- *
- * Virtual scrolling:
- *   Implemented without a library. A ResizeObserver tracks the container
- *   size; scroll position drives a memo that computes only the visible row
- *   range (+OVERSCAN). Each visible row renders numColumns cells inline —
- *   no column virtualisation needed because numColumns = floor(width/12) is
- *   always small enough to render directly (~80-300 per row).
+ * Rendering:
+ *   A single <canvas> draws visible cells. A scroll container beneath provides
+ *   the native scrollbar. The canvas is sized to exclude the scrollbar width.
+ *   Repaints are driven by a reactive effect tracking scroll, size, and data.
  */
 import {
   createSignal,
@@ -58,11 +32,7 @@ import type { Checkboxes } from './module_bindings/types.ts';
 const NUM_BOXES = 1_000_000_000;
 const NUM_DOCUMENTS = 250_000;
 const CELL_SIZE = 22; // px
-const OVERSCAN = 3;   // extra rows rendered beyond the visible edge
 
-/**
- * 16-color palette: index 0 = "clear/uncheck", indices 1-15 = colors.
- */
 const PALETTE: string[] = [
   '#f3f4f6', // 0: clear / uncheck
   '#111827', // 1: near-black
@@ -84,257 +54,198 @@ const PALETTE: string[] = [
 
 // ─── Nibble helpers ────────────────────────────────────────────────────────────
 
-/** Read the 4-bit nibble color for arrayIdx from a byte array. */
 function getColor(boxes: number[], arrayIdx: number): number {
   const byte = boxes[Math.floor(arrayIdx / 2)] || 0;
   return arrayIdx % 2 === 0 ? (byte & 0x0f) : (byte >> 4) & 0x0f;
 }
 
-/**
- * Return a new copy of `boxes` with the nibble at `arrayIdx` set to `color`.
- * Used for optimistic updates — never mutates the original array.
- */
-function applyNibble(boxes: number[], arrayIdx: number, color: number): number[] {
-  const byteIdx = Math.floor(arrayIdx / 2);
-  const copy = [...boxes];
-  const byte = copy[byteIdx] ?? 0;
-  copy[byteIdx] =
-    arrayIdx % 2 === 0
-      ? (byte & 0xf0) | (color & 0x0f)
-      : (byte & 0x0f) | ((color & 0x0f) << 4);
-  return copy;
+function countColored(boxes: number[]): number {
+  let count = 0;
+  for (let i = 0; i < boxes.length; i++) {
+    const byte = boxes[i];
+    if (byte === 0) continue;
+    if (byte & 0x0f) count++;
+    if (byte >> 4) count++;
+  }
+  return count;
 }
 
 // ─── Component ────────────────────────────────────────────────────────────────
 
 export default function App() {
-  // ── Table state ──────────────────────────────────────────────────────────
-  const [checkboxRows, setCheckboxRows] = createSignal<Checkboxes[]>([]);
+  // ── Data state ──────────────────────────────────────────────────────────
+  const [boxesMap, setBoxesMap] = createSignal(
+    new Map<number, number[]>(),
+    { equals: false },
+  );
 
-  // ── Async subscription readiness ──────────────────────────────────────────
-  //
-  // In SolidJS 2.0, createMemo can return a Promise — no createAsync needed.
-  // The reactivity system treats any memo that returns a Promise as "async":
-  //   • isPending(() => subscriptionReady()) → true while the Promise is pending
-  //   • Reading subscriptionReady() inside a <Loading> boundary causes it to
-  //     show the fallback until the Promise resolves
-  //
-  // We bridge SpacetimeDB's callback-based onApplied into a Promise using a
-  // simple resolver variable captured at construction time.
+  const [numCheckedBoxes, setNumCheckedBoxes] = createSignal(0);
+  const docColorCounts = new Map<number, number>();
+
+  // ── Async subscription + canvas readiness ─────────────────────────────
   let resolveSubscription!: () => void;
   const subscriptionPromise = new Promise<void>(res => { resolveSubscription = res; });
 
-  const subscriptionReady = createMemo(async () => {
+  // Single async memo gates <Loading> — resolves when subscription data
+  // is loaded AND the container has been measured (so canvas can paint).
+  const [containerMeasured, setContainerMeasured] = createSignal(false);
+
+  const gridReady = createMemo(async () => {
     await subscriptionPromise;
+    // Wait for container measurement before resolving
+    await new Promise<void>(res => {
+      const check = () => {
+        if (containerMeasured()) { res(); return; }
+        // Poll briefly — ResizeObserver fires within a frame or two
+        requestAnimationFrame(check);
+      };
+      check();
+    });
     return true as const;
   });
 
-  // ── Global pending indicator ──────────────────────────────────────────────
-  //
-  // isPending() takes a thunk; returns true when any async memo accessed
-  // inside that thunk is still resolving its Promise.
-  //
-  // Called HERE — outside any <Loading> boundary — so reading subscriptionReady()
-  // inside the thunk does NOT cause this component to suspend. It only observes
-  // the pending state without participating in it.
-  const isSyncing = () => isPending(() => subscriptionReady());
+  // isPending() read OUTSIDE <Loading> so the header observes but never suspends.
+  const isSyncing = () => isPending(() => gridReady());
 
-  /**
-   * Pending optimistic nibble writes that haven't been confirmed by the server
-   * yet.  Shape: Map<documentIdx, Map<arrayIdx, color>>.
-   * Cleared per-document the moment SpacetimeDB delivers the confirmed row.
-   */
+  // ── Pending optimistic writes ─────────────────────────────────────────
   const [pendingUpdates, setPendingUpdates] = createSignal(
     new Map<number, Map<number, number>>(),
   );
 
-  // ── UI state ─────────────────────────────────────────────────────────────
+  // ── Round-trip timing ─────────────────────────────────────────────────
+  // Tracks in-flight toggle times per document to compute round-trip ms.
+  const inflightTimes = new Map<number, number>();
+  const [pendingToggleCount, setPendingToggleCount] = createSignal(0);
+  const [lastRoundTripMs, setLastRoundTripMs] = createSignal<number | null>(null);
+  let roundTripFadeTimer = 0;
+
+  // ── UI state ──────────────────────────────────────────────────────────
   const [selectedColor, setSelectedColor] = createSignal(1);
 
-  // ── Virtual scroll state ─────────────────────────────────────────────────
-  let containerRef!: HTMLDivElement; // outer flex-child that holds the scroll div
-  let scrollRef!: HTMLDivElement;    // the actual overflow:auto element
+  // ── Virtual scroll state ──────────────────────────────────────────────
+  let containerRef!: HTMLDivElement;
+  let scrollRef!: HTMLDivElement;
+  let canvasRef!: HTMLCanvasElement;
   const [size, setSize] = createSignal({ width: 0, height: 0 });
   const [scrollTop, setScrollTop] = createSignal(0);
+  const [scrollbarWidth, setScrollbarWidth] = createSignal(0);
 
-  // ── One-time setup after mount ────────────────────────────────────────────
-  //
-  // onSettled is SolidJS 2.0's replacement for onMount. It fires after the
-  // component's initial DOM is settled (including any async work). We use it
-  // for two things that must run exactly once:
-  //   1. Wire up the ResizeObserver for container dimensions.
-  //   2. Register SpacetimeDB row-event callbacks and start the subscription.
-  //
+  /** Measure scrollbar width from the scroll container. */
+  const measureScrollbar = () => {
+    if (scrollRef) {
+      setScrollbarWidth(scrollRef.offsetWidth - scrollRef.clientWidth);
+    }
+  };
+
+  // ── One-time setup after mount ────────────────────────────────────────
   onSettled(() => {
-    // 1. Container resize tracking
     const obs = new ResizeObserver((entries) => {
       const e = entries[0];
-      if (e) setSize({ width: e.contentRect.width, height: e.contentRect.height });
+      if (e) {
+        setSize({ width: e.contentRect.width, height: e.contentRect.height });
+        if (!containerMeasured()) setContainerMeasured(true);
+        // Re-measure scrollbar on resize
+        measureScrollbar();
+      }
     });
     obs.observe(containerRef);
     onCleanup(() => obs.disconnect());
 
-    // 2a. SpacetimeDB event handlers — called for every row insert/update/delete
-    //     that arrives over the WebSocket after the subscription is active.
-    conn.db.checkboxes.onInsert((_ctx: EventContext, row: Checkboxes) => {
-      setCheckboxRows((prev) => [...prev.filter((r) => r.idx !== row.idx), row]);
-      // A confirmed insert for this document supersedes any optimistic state.
-      setPendingUpdates((prev) => {
+    // SpacetimeDB event handlers
+    const upsertRow = (row: Checkboxes) => {
+      const boxes = Array.from(row.boxes);
+      setBoxesMap(map => { map.set(row.idx, boxes); return map; });
+
+      const newCount = countColored(boxes);
+      const oldCount = docColorCounts.get(row.idx) ?? 0;
+      docColorCounts.set(row.idx, newCount);
+      setNumCheckedBoxes(prev => prev + newCount - oldCount);
+
+      // Clear pending optimistic overlay
+      setPendingUpdates(prev => {
         if (!prev.has(row.idx)) return prev;
         const next = new Map(prev);
         next.delete(row.idx);
         return next;
       });
-    });
 
-    conn.db.checkboxes.onUpdate(
-      (_ctx: EventContext, _old: Checkboxes, row: Checkboxes) => {
-        setCheckboxRows((prev) => prev.map((r) => (r.idx === row.idx ? row : r)));
-        // Server-confirmed update — drop the optimistic overlay for this doc.
-        setPendingUpdates((prev) => {
-          if (!prev.has(row.idx)) return prev;
-          const next = new Map(prev);
-          next.delete(row.idx);
-          return next;
-        });
-      },
-    );
+      // Compute round-trip time
+      const startTime = inflightTimes.get(row.idx);
+      if (startTime !== undefined) {
+        inflightTimes.delete(row.idx);
+        const ms = Math.round(performance.now() - startTime);
+        setLastRoundTripMs(ms);
+        setPendingToggleCount(c => Math.max(0, c - 1));
+
+        // Keep the ms visible for 2s then clear
+        clearTimeout(roundTripFadeTimer);
+        roundTripFadeTimer = window.setTimeout(() => setLastRoundTripMs(null), 2000);
+      }
+    };
+
+    conn.db.checkboxes.onInsert((_ctx: EventContext, row: Checkboxes) => upsertRow(row));
+    conn.db.checkboxes.onUpdate((_ctx: EventContext, _old: Checkboxes, row: Checkboxes) => upsertRow(row));
 
     conn.db.checkboxes.onDelete((_ctx: EventContext, row: Checkboxes) => {
-      setCheckboxRows((prev) => prev.filter((r) => r.idx !== row.idx));
+      setBoxesMap(map => { map.delete(row.idx); return map; });
+      const oldCount = docColorCounts.get(row.idx) ?? 0;
+      docColorCounts.delete(row.idx);
+      setNumCheckedBoxes(prev => prev - oldCount);
     });
 
-    // 2b. Subscribe — SpacetimeDB will replay all existing rows via onInsert,
-    //     then fire onApplied to signal that the initial snapshot is complete.
-    //     Resolving subscriptionPromise here unblocks the async memo above,
-    //     which in turn makes isPending() return false and <Loading> render
-    //     the grid content instead of the connecting fallback.
     conn
       .subscriptionBuilder()
       .onApplied(() => resolveSubscription())
       .subscribe(['SELECT * FROM checkboxes']);
   });
 
-  // ── Derived state (memos) ─────────────────────────────────────────────────
-
-  /** Index confirmed rows by documentIdx for O(1) lookup in each cell. */
-  const boxesMap = createMemo(() => {
-    const map = new Map<number, number[]>();
-    for (const row of checkboxRows()) {
-      map.set(row.idx, Array.from(row.boxes));
-    }
-    return map;
-  });
-
-  /**
-   * Server state merged with any not-yet-confirmed local writes.
-   * Returns a new Map only when either source changes; SolidJS will only
-   * re-evaluate downstream computations when this memo's return value changes.
-   */
-  const optimisticBoxesMap = createMemo(() => {
-    const base = boxesMap();
-    const pending = pendingUpdates();
-    if (pending.size === 0) return base;
-
-    const result = new Map(base);
-    for (const [docIdx, updates] of pending) {
-      const currentBoxes = result.get(docIdx) ?? new Array(2000).fill(0);
-      let boxes = [...currentBoxes];
-      for (const [arrIdx, color] of updates) {
-        boxes = applyNibble(boxes, arrIdx, color);
-      }
-      result.set(docIdx, boxes);
-    }
-    return result;
-  });
-
-  /** Count of all colored (non-zero nibble) cells across loaded documents. */
-  const numCheckedBoxes = createMemo(() => {
-    let count = 0;
-    for (const boxes of optimisticBoxesMap().values()) {
-      for (const byte of boxes) {
-        if (byte === 0) continue;
-        if (byte & 0x0f) count++;
-        if (byte >> 4) count++;
-      }
-    }
-    return count;
-  });
-
-  // ── Virtual scroll derived values ─────────────────────────────────────────
+  // ── Derived scroll values ─────────────────────────────────────────────
   const numColumns = () => Math.max(1, Math.floor(size().width / CELL_SIZE));
   const numRows = () => Math.ceil(NUM_BOXES / numColumns());
   const totalHeight = () => numRows() * CELL_SIZE;
+  const canvasWidth = () => Math.max(0, size().width - scrollbarWidth());
+  const canvasHeight = () => size().height;
 
-  const firstVisibleRow = () =>
-    Math.max(0, Math.floor(scrollTop() / CELL_SIZE) - OVERSCAN);
-  const lastVisibleRow = () =>
-    Math.min(
-      numRows() - 1,
-      Math.floor((scrollTop() + size().height) / CELL_SIZE) + OVERSCAN,
-    );
+  // ── Side effects ──────────────────────────────────────────────────────
 
-  /** Stable array of row indices to render, recomputed only on scroll/resize. */
-  const visibleRowIndices = createMemo(() => {
-    const rows: number[] = [];
-    for (let r = firstVisibleRow(); r <= lastVisibleRow(); r++) rows.push(r);
-    return rows;
-  });
-
-  // ── Side effects ──────────────────────────────────────────────────────────
-
-  /**
-   * SolidJS 2.0 two-phase createEffect:
-   *
-   *   createEffect(computeFn, applyFn)
-   *
-   *   Phase 1 — "compute": runs inside a reactive tracking context.
-   *     Reading signals here registers them as dependencies; this phase
-   *     runs again whenever any dependency changes.
-   *
-   *   Phase 2 — "apply": receives the value returned by computeFn and runs
-   *     the actual side effect *outside* the tracking context, so accessing
-   *     signals here does NOT create additional dependencies and cannot cause
-   *     feedback loops.
-   *
-   * In SolidJS 1.x a single createEffect(fn) did both tracking and side
-   * effects in one pass, which could cause subtle re-entrancy bugs. The 2.0
-   * split makes the contract explicit and mirrors the way browser rendering
-   * separates layout (read) from paint (write).
-   */
   createEffect(
-    // Phase 1 — compute: track numCheckedBoxes
     () => numCheckedBoxes(),
-    // Phase 2 — apply: update document title (DOM write, untracked)
     (count) => {
       document.title = `${count.toLocaleString()} colored — One Billion Checkboxes`;
     },
   );
 
-  // ── Scroll handler (rAF-throttled) ────────────────────────────────────────
+  // ── Scroll handler (rAF-throttled) ────────────────────────────────────
   let rafId = 0;
-  const onScroll = (e: Event) => {
+  const onScroll = () => {
     cancelAnimationFrame(rafId);
     rafId = requestAnimationFrame(() => {
-      setScrollTop((e.target as HTMLElement).scrollTop);
+      if (!scrollRef) return;
+      setScrollTop(scrollRef.scrollTop);
+      measureScrollbar();
     });
   };
 
-  // ── Toggle handler ────────────────────────────────────────────────────────
-  // subscriptionReady() returns true once resolved, undefined while pending.
-  const loading = () => !isConnected() || !subscriptionReady();
+  // ── Toggle handler ────────────────────────────────────────────────────
+  const loading = () => !isConnected() || !gridReady();
 
   const toggle = (documentIdx: number, arrayIdx: number) => {
     if (loading()) return;
 
-    const boxes = optimisticBoxesMap().get(documentIdx);
-    const currentColor = boxes ? getColor(boxes, arrayIdx) : 0;
-    // Clicking a cell that already has the selected color clears it (toggle off).
+    const base = boxesMap().get(documentIdx);
+    const pending = pendingUpdates().get(documentIdx);
+
+    let currentColor = 0;
+    if (pending?.has(arrayIdx)) {
+      currentColor = pending.get(arrayIdx)!;
+    } else if (base) {
+      currentColor = getColor(base, arrayIdx);
+    }
+
     const newColor =
       currentColor === selectedColor() && selectedColor() !== 0 ? 0 : selectedColor();
 
-    // Apply optimistic update immediately so the UI feels instant.
-    setPendingUpdates((prev) => {
+    setPendingUpdates(prev => {
       const next = new Map(prev);
       const docMap = new Map(next.get(documentIdx) ?? []);
       docMap.set(arrayIdx, newColor);
@@ -342,18 +253,144 @@ export default function App() {
       return next;
     });
 
-    // Fire the server reducer; SpacetimeDB will confirm via onInsert/onUpdate
-    // which clears the pending entry above.
+    // Track round-trip timing
+    inflightTimes.set(documentIdx, performance.now());
+    setPendingToggleCount(c => c + 1);
+
     conn.reducers.toggle({ documentIdx, arrayIdx, color: newColor });
   };
 
-  // ── Column index array helper ─────────────────────────────────────────────
-  //
-  // createMemo so we don't rebuild the array on every re-render; only when
-  // numColumns changes (i.e. on window resize).
-  //
-  const columnIndices = createMemo(() =>
-    Array.from({ length: numColumns() }, (_, i) => i),
+  // ── Canvas paint ──────────────────────────────────────────────────────
+
+  const getCellColor = (
+    boxes: Map<number, number[]>,
+    pending: Map<number, Map<number, number>>,
+    documentIdx: number,
+    arrayIdx: number,
+  ): number => {
+    const docPending = pending.get(documentIdx);
+    if (docPending?.has(arrayIdx)) return docPending.get(arrayIdx)!;
+    const docBoxes = boxes.get(documentIdx);
+    return docBoxes ? getColor(docBoxes, arrayIdx) : 0;
+  };
+
+  let cachedCtx: CanvasRenderingContext2D | null = null;
+  let lastDpr = 0;
+
+  const paintGrid = () => {
+    const canvas = canvasRef;
+    if (!canvas) return;
+
+    const cw = canvasWidth();
+    const ch = canvasHeight();
+    if (cw <= 0 || ch <= 0) return;
+
+    const dpr = window.devicePixelRatio || 1;
+    const bufW = Math.round(cw * dpr);
+    const bufH = Math.round(ch * dpr);
+
+    if (canvas.width !== bufW || canvas.height !== bufH) {
+      canvas.width = bufW;
+      canvas.height = bufH;
+      cachedCtx = null;
+    }
+
+    if (!cachedCtx || dpr !== lastDpr) {
+      cachedCtx = canvas.getContext('2d', { alpha: false })!;
+      if (!cachedCtx) return;
+      cachedCtx.setTransform(dpr, 0, 0, dpr, 0, 0);
+      lastDpr = dpr;
+    }
+
+    const ctx2d = cachedCtx;
+    ctx2d.fillStyle = '#fff';
+    ctx2d.fillRect(0, 0, cw, ch);
+
+    const cols = numColumns();
+    const sTop = scrollTop();
+    const firstRow = Math.max(0, Math.floor(sTop / CELL_SIZE));
+    const lastRow = Math.min(numRows() - 1, Math.ceil((sTop + ch) / CELL_SIZE));
+    const boxes = boxesMap();
+    const pending = pendingUpdates();
+
+    const innerSize = CELL_SIZE - 2;
+
+    // Pass 1: empty cell borders
+    ctx2d.strokeStyle = '#e5e7eb';
+    ctx2d.lineWidth = 1;
+    for (let row = firstRow; row <= lastRow; row++) {
+      const y = row * CELL_SIZE - sTop;
+      for (let col = 0; col < cols; col++) {
+        const index = row * cols + col;
+        if (index >= NUM_BOXES) break;
+
+        const documentIdx = index % NUM_DOCUMENTS;
+        const arrayIdx = Math.floor(index / NUM_DOCUMENTS);
+        const colorVal = getCellColor(boxes, pending, documentIdx, arrayIdx);
+
+        if (colorVal === 0) {
+          const cx = col * CELL_SIZE + 1.5;
+          const cy = y + 1.5;
+          ctx2d.beginPath();
+          ctx2d.roundRect(cx, cy, innerSize - 1, innerSize - 1, 3);
+          ctx2d.stroke();
+        }
+      }
+    }
+
+    // Pass 2: filled cells
+    let currentFill = '';
+    ctx2d.lineWidth = 2;
+    ctx2d.lineCap = 'round';
+    ctx2d.lineJoin = 'round';
+
+    for (let row = firstRow; row <= lastRow; row++) {
+      const y = row * CELL_SIZE - sTop;
+      for (let col = 0; col < cols; col++) {
+        const index = row * cols + col;
+        if (index >= NUM_BOXES) break;
+
+        const documentIdx = index % NUM_DOCUMENTS;
+        const arrayIdx = Math.floor(index / NUM_DOCUMENTS);
+        const colorVal = getCellColor(boxes, pending, documentIdx, arrayIdx);
+
+        if (colorVal > 0) {
+          const cx = col * CELL_SIZE + 1;
+          const cy = y + 1;
+
+          const fill = PALETTE[colorVal];
+          if (fill !== currentFill) {
+            currentFill = fill;
+            ctx2d.fillStyle = fill;
+          }
+
+          ctx2d.beginPath();
+          ctx2d.roundRect(cx, cy, innerSize, innerSize, 3);
+          ctx2d.fill();
+
+          // Checkmark
+          ctx2d.strokeStyle = '#fff';
+          ctx2d.beginPath();
+          ctx2d.moveTo(cx + innerSize * 0.22, cy + innerSize * 0.50);
+          ctx2d.lineTo(cx + innerSize * 0.42, cy + innerSize * 0.72);
+          ctx2d.lineTo(cx + innerSize * 0.78, cy + innerSize * 0.30);
+          ctx2d.stroke();
+        }
+      }
+    }
+  };
+
+  // Repaint whenever scroll, data, or size changes
+  createEffect(
+    () => {
+      scrollTop();
+      size();
+      scrollbarWidth();
+      boxesMap();
+      pendingUpdates();
+      numColumns();
+    },
+    () => paintGrid(),
   );
 
   // ─────────────────────────────────────────────────────────────────────────
@@ -391,12 +428,7 @@ export default function App() {
             <span style={{ 'font-weight': '700', 'font-size': '1rem' }}>
               One Billion Checkboxes
             </span>
-            {/*
-              Global isPending indicator.
-              isPending() is read OUTSIDE <Loading> so the header never suspends —
-              it just observes whether the async subscriptionReady memo is still
-              in-flight and shows a spinner while it is.
-            */}
+            {/* Connection spinner */}
             <Show when={isSyncing()}>
               <span
                 aria-label="Connecting…"
@@ -411,6 +443,34 @@ export default function App() {
                   'flex-shrink': '0',
                 }}
               />
+            </Show>
+            {/* Toggle round-trip indicator */}
+            <Show when={!isSyncing() && (pendingToggleCount() > 0 || lastRoundTripMs() !== null)}>
+              <span style={{
+                display: 'inline-flex',
+                'align-items': 'center',
+                gap: '4px',
+                'font-size': '0.7rem',
+                color: pendingToggleCount() > 0 ? '#9ca3af' : '#16a34a',
+                'font-variant-numeric': 'tabular-nums',
+                transition: 'color 0.2s ease-out',
+              }}>
+                <Show when={pendingToggleCount() > 0} fallback={
+                  <span style={{ color: '#16a34a' }}>{lastRoundTripMs()}ms</span>
+                }>
+                  <span
+                    style={{
+                      display: 'inline-block',
+                      width: '8px',
+                      height: '8px',
+                      border: '1.5px solid #e5e7eb',
+                      'border-top-color': '#9ca3af',
+                      'border-radius': '50%',
+                      animation: 'spin 0.6s linear infinite',
+                    }}
+                  />
+                </Show>
+              </span>
             </Show>
           </div>
           <div style={{ color: '#6b7280', 'font-size': '0.8rem', 'margin-top': '2px' }}>
@@ -431,14 +491,6 @@ export default function App() {
         >
           <span style={{ 'font-size': '0.75rem', color: '#9ca3af' }}>Color:</span>
           <div style={{ display: 'flex', gap: '3px', 'flex-wrap': 'wrap' }}>
-            {/*
-              <For> with keyed={false} is the SolidJS 2.0 replacement for
-              <Index> from 1.x. Items are identified by position rather than
-              value, so the item callback receives an accessor (fn) for the
-              value and a plain number for the index — matching the old
-              <Index> contract. Use it when the identity of each item is its
-              stable position in the array (e.g. a static palette list).
-            */}
             <For each={PALETTE} keyed={false}>
               {(colorAccessor, i) => (
                 <button
@@ -486,26 +538,8 @@ export default function App() {
         ref={containerRef}
         style={{ 'flex-grow': '1', overflow: 'hidden', position: 'relative' }}
       >
-        {/*
-          <Loading> — SolidJS 2.0 async boundary.
-          NOTE: <Suspense> is fully removed in 2.0; <Loading> replaces it.
-
-          Props used:
-            on={subscriptionReady}   — the memo accessor to watch. Loading tracks
-              this async dependency directly rather than relying on subscriptionReady()
-              being read somewhere inside the children tree.
-            fallback={…}             — rendered while the async memo is pending.
-
-          Behaviour vs the old <Suspense>:
-            • <Suspense> tore down children on EVERY async transition.
-            • <Loading> shows the fallback only on the INITIAL load. After that,
-              background refreshes keep the existing UI stable and instead make
-              isPending() return true (used above for the header spinner).
-          Once subscriptionReady resolves, <Loading> renders the grid permanently —
-          real-time WebSocket updates flow through signals, not new async boundaries.
-        */}
         {/* eslint-disable-next-line @typescript-eslint/no-explicit-any */}
-        <Loading {...{ on: subscriptionReady } as any} fallback={
+        <Loading {...{ on: gridReady } as any} fallback={
           <div style={{
             display: 'flex',
             'flex-direction': 'column',
@@ -525,113 +559,56 @@ export default function App() {
               'border-radius': '50%',
               animation: 'spin 0.75s linear infinite',
             }} />
-            <span style={{ 'font-size': '0.875rem' }}>Connecting to SpacetimeDB…</span>
+            <span style={{ 'font-size': '0.875rem' }}>
+              {isConnected() ? 'Loading checkboxes…' : 'Connecting to SpacetimeDB…'}
+            </span>
           </div>
         }>
-          {/*
-            subscriptionReady() is read here — inside the <Loading> boundary.
-            While its underlying Promise is pending, SolidJS suspends this
-            subtree and <Loading> renders the fallback above instead.
-            Once the Promise resolves, the grid renders and stays rendered.
-            The size().width > 0 guard prevents a 1B-row flash before the
-            ResizeObserver fires.
-          */}
-          <Show when={subscriptionReady() && size().width > 0}>
+          <Show when={gridReady()}>
+          {/* Scroll container — tall spacer provides the native scrollbar */}
           <div
-            ref={scrollRef}
+            ref={(el: HTMLDivElement) => {
+              scrollRef = el;
+              // Measure scrollbar as soon as the scroll container mounts
+              requestAnimationFrame(() => measureScrollbar());
+            }}
             style={{ width: '100%', height: '100%', overflow: 'auto' }}
             onScroll={onScroll}
           >
-            {/*
-              Full virtual canvas at the correct total height. Only a tiny
-              subset of rows are rendered inside; they are absolutely
-              positioned so the scroll thumb represents the true document size.
-            */}
-            <div
-              style={{
-                height: `${totalHeight()}px`,
-                width: `${numColumns() * CELL_SIZE}px`,
-                position: 'relative',
-              }}
-            >
-              {/*
-                Outer <For> — visible rows. keyed=true (default) so SolidJS
-                tracks rows by their index value; scrolling in or out causes
-                minimal DOM churn (add/remove rows at the edges).
-              */}
-              <For each={visibleRowIndices()}>
-                {(rowIdx) => (
-                  <div
-                    style={{
-                      position: 'absolute',
-                      top: `${rowIdx() * CELL_SIZE}px`,
-                      left: '0',
-                      height: `${CELL_SIZE}px`,
-                      display: 'flex',
-                    }}
-                  >
-                    {/*
-                      Inner <For> — columns within the row. keyed=true;
-                      columnIndices only changes on window resize so this
-                      reconciliation is rare.
-                    */}
-                    <For each={columnIndices()}>
-                      {(colIdx) => {
-                        const index = rowIdx() * numColumns() + colIdx();
-                        if (index >= NUM_BOXES) return null;
-
-                        // Stripe across documents so adjacent cells on
-                        // screen spread write contention across rows.
-                        const documentIdx = index % NUM_DOCUMENTS;
-                        const arrayIdx = Math.floor(index / NUM_DOCUMENTS);
-
-                        // These accessor functions are reactive — SolidJS
-                        // tracks optimisticBoxesMap() as a dependency and
-                        // re-runs the JSX expressions that call them whenever
-                        // the map changes, updating only the specific DOM
-                        // nodes that actually changed color.
-                        const colorValue = () => {
-                          const boxes = optimisticBoxesMap().get(documentIdx);
-                          return boxes ? getColor(boxes, arrayIdx) : 0;
-                        };
-                        const isColored = () => colorValue() > 0;
-                        const bg = () =>
-                          isColored() ? PALETTE[colorValue()] : '#fff';
-                        const border = () =>
-                          isColored() ? PALETTE[colorValue()] : '#e5e7eb';
-
-                        return (
-                          <div style={{ padding: '1px' }}>
-                            <div
-                              onClick={() => toggle(documentIdx, arrayIdx)}
-                              style={{
-                                width: `${CELL_SIZE - 2}px`,
-                                height: `${CELL_SIZE - 2}px`,
-                                'background-color': bg(),
-                                border: `1px solid ${border()}`,
-                                'border-radius': '3px',
-                                'box-sizing': 'border-box',
-                                cursor: loading() ? 'default' : 'pointer',
-                                transition: 'background-color 0.1s ease-out, border-color 0.1s ease-out',
-                                display: 'flex',
-                                'align-items': 'center',
-                                'justify-content': 'center',
-                                'font-size': '12px',
-                                'line-height': '1',
-                                color: '#fff',
-                              }}
-                            >
-                              {isColored() ? '✓' : ''}
-                            </div>
-                          </div>
-                        );
-                      }}
-                    </For>
-                  </div>
-                )}
-              </For>
-            </div>
+            <div style={{ height: `${totalHeight()}px`, width: `${numColumns() * CELL_SIZE}px` }} />
           </div>
+          {/* Canvas sized to exclude the scrollbar — no overlap */}
+          <canvas
+            ref={canvasRef}
+            style={{
+              position: 'absolute',
+              top: '0',
+              left: '0',
+              width: `${canvasWidth()}px`,
+              height: `${canvasHeight()}px`,
+              cursor: loading() ? 'default' : 'pointer',
+            }}
+            onWheel={(e) => {
+              scrollRef.scrollTop += e.deltaY;
+              scrollRef.scrollLeft += e.deltaX;
+              e.preventDefault();
+            }}
+            onClick={(e) => {
+              if (loading()) return;
+              const rect = canvasRef.getBoundingClientRect();
+              const mx = e.clientX - rect.left;
+              const my = e.clientY - rect.top;
+              const col = Math.floor(mx / CELL_SIZE);
+              const row = Math.floor((my + scrollTop()) / CELL_SIZE);
+              const cols = numColumns();
+              if (col >= cols) return;
+              const index = row * cols + col;
+              if (index >= NUM_BOXES) return;
+              const documentIdx = index % NUM_DOCUMENTS;
+              const arrayIdx = Math.floor(index / NUM_DOCUMENTS);
+              toggle(documentIdx, arrayIdx);
+            }}
+          />
           </Show>
         </Loading>
       </div>

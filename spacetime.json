@@ -2,8 +2,7 @@
   "dev": {
     "run": "npm run dev"
   },
-  "_source-config": "spacetime.local.json",
   "server": "maincloud",
   "module-path": "./spacetimedb",
-  "database": "one-million-spacetime-qv0mt"
+  "database": "deni-x4u44"
 }
