@@ -126,6 +126,19 @@ export default spacetimedb;
 
 // --- Helpers ---
 
+/** Atomically increment or decrement totalColored by exactly 1. */
+function incrementStats(ctx: any, delta: 1 | -1) {
+  const row = ctx.db.stats.id.find(0);
+  if (row) {
+    const next = delta === 1
+      ? row.totalColored + 1n
+      : row.totalColored > 0n ? row.totalColored - 1n : 0n;
+    ctx.db.stats.id.update({ ...row, totalColored: next });
+  } else {
+    ctx.db.stats.insert({ id: 0, totalColored: delta === 1 ? 1n : 0n });
+  }
+}
+
 /** Recalculate totalColored by scanning all checkboxes rows. */
 function recalcStats(ctx: any) {
   let total = 0;
@@ -161,13 +174,18 @@ export const toggle = spacetimedb.reducer(
     const existing = ctx.db.checkboxes.idx.find(documentIdx);
     if (existing) {
       const boxes = new Uint8Array(existing.boxes);
+      const oldColor = getColor(boxes, arrayIdx);
       if (setColor(boxes, arrayIdx, clampedColor)) {
         ctx.db.checkboxes.idx.update({ ...existing, boxes });
+        // Atomic ±1 stats update (only when colored state changes)
+        if (oldColor === 0 && clampedColor > 0) incrementStats(ctx, 1);
+        else if (oldColor > 0 && clampedColor === 0) incrementStats(ctx, -1);
       }
     } else if (clampedColor > 0) {
       const boxes = emptyBoxes();
       setColor(boxes, arrayIdx, clampedColor);
       ctx.db.checkboxes.insert({ idx: documentIdx, boxes });
+      incrementStats(ctx, 1);
     }
   }
 );
