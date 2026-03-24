@@ -572,6 +572,14 @@ export default function App() {
           >
             Powered by SpacetimeDB
           </a>
+          {" and "}
+          <a
+            style={{ "text-decoration": "none", color: "#6b7280" }}
+            href="https://github.com/solidjs/solid/discussions/2596"
+            target="_blank"
+          >
+            Solid 2.0
+          </a>
         </div>
       </div>
 
