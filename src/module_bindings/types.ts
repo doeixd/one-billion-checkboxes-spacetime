@@ -32,17 +32,24 @@ export const FingerprintRateLimit = __t.object("FingerprintRateLimit", {
 });
 export type FingerprintRateLimit = __Infer<typeof FingerprintRateLimit>;
 
-export const GolRowChunk = __t.object("GolRowChunk", {
-  rowIdx: __t.u32(),
+export const GolGrid = __t.object("GolGrid", {
+  id: __t.u32(),
   cells: __t.byteArray(),
+  generation: __t.u64(),
 });
-export type GolRowChunk = __Infer<typeof GolRowChunk>;
+export type GolGrid = __Infer<typeof GolGrid>;
 
 export const GolMeta = __t.object("GolMeta", {
   id: __t.u32(),
   generation: __t.u64(),
 });
 export type GolMeta = __Infer<typeof GolMeta>;
+
+export const GolRowChunk = __t.object("GolRowChunk", {
+  rowIdx: __t.u32(),
+  cells: __t.byteArray(),
+});
+export type GolRowChunk = __Infer<typeof GolRowChunk>;
 
 export const GolTickJob = __t.object("GolTickJob", {
   scheduledId: __t.u64(),

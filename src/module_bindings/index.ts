@@ -46,8 +46,9 @@ import ToggleReducer from "./toggle_reducer";
 // Import all table schema definitions
 import CheckboxChangesRow from "./checkbox_changes_table";
 import CheckboxesRow from "./checkboxes_table";
-import GolRowChunkRow from "./gol_row_chunk_table";
+import GolGridRow from "./gol_grid_table";
 import GolMetaRow from "./gol_meta_table";
+import GolRowChunkRow from "./gol_row_chunk_table";
 import StatsRow from "./stats_table";
 
 /** Type-only namespace exports for generated type groups. */
@@ -76,17 +77,17 @@ const tablesSchema = __schema({
       { name: 'checkboxes_idx_key', constraint: 'unique', columns: ['idx'] },
     ],
   }, CheckboxesRow),
-  golRowChunk: __table({
-    name: 'gol_row_chunk',
+  golGrid: __table({
+    name: 'gol_grid',
     indexes: [
-      { accessor: 'rowIdx', name: 'gol_row_chunk_row_idx_idx_btree', algorithm: 'btree', columns: [
-        'rowIdx',
+      { accessor: 'id', name: 'gol_grid_id_idx_btree', algorithm: 'btree', columns: [
+        'id',
       ] },
     ],
     constraints: [
-      { name: 'gol_row_chunk_row_idx_key', constraint: 'unique', columns: ['rowIdx'] },
+      { name: 'gol_grid_id_key', constraint: 'unique', columns: ['id'] },
     ],
-  }, GolRowChunkRow),
+  }, GolGridRow),
   golMeta: __table({
     name: 'gol_meta',
     indexes: [
@@ -98,6 +99,17 @@ const tablesSchema = __schema({
       { name: 'gol_meta_id_key', constraint: 'unique', columns: ['id'] },
     ],
   }, GolMetaRow),
+  golRowChunk: __table({
+    name: 'gol_row_chunk',
+    indexes: [
+      { accessor: 'rowIdx', name: 'gol_row_chunk_row_idx_idx_btree', algorithm: 'btree', columns: [
+        'rowIdx',
+      ] },
+    ],
+    constraints: [
+      { name: 'gol_row_chunk_row_idx_key', constraint: 'unique', columns: ['rowIdx'] },
+    ],
+  }, GolRowChunkRow),
   stats: __table({
     name: 'stats',
     indexes: [

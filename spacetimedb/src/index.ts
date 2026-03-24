@@ -191,6 +191,16 @@ const spacetimedb = schema({
   ),
   syncStatsJob: SyncStatsJob,
   pruneChangesJob: PruneChangesJob,
+  // Kept for migration compatibility — SpacetimeDB doesn't allow removing tables.
+  // No longer read or written; superseded by golRowChunk + golMeta.
+  golGrid: table(
+    { name: 'gol_grid', public: true },
+    {
+      id: t.u32().primaryKey(),
+      cells: t.byteArray(),
+      generation: t.u64(),
+    }
+  ),
   golRowChunk: GolRowChunk,
   golMeta: GolMeta,
   golTickJob: GolTickJob,
