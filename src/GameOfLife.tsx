@@ -6,9 +6,10 @@
  * player's identity-derived color. The simulation evolves from there.
  * All clients see the same board state — no local simulation.
  *
- * Data model (post-optimisation):
- *   gol_row_chunk  — 50 rows × 25 bytes nibble-packed; SpacetimeDB only
- *                    broadcasts rows that actually changed each tick.
+ * Data model:
+ *   gol_diff       — single row; packed [x, y, color] cell diffs per tick.
+ *   gol_row_chunk  — 50 rows × 25 bytes nibble-packed; initial state for
+ *                    new clients + periodic snapshots (every ~50 ticks).
  *   gol_meta       — single row; generation counter updated every tick.
  *
  * Rendering: each cell is a div with a CSS class (gol-c0..gol-c15) for
@@ -289,19 +290,16 @@ export default function GameOfLife() {
               style={{ "--cell-px": `${cellPx()}px` }}
             >
               <For each={indices} keyed={false}>
-                {(idxAccessor) => {
-                  const x = () => idxAccessor() % GOL_COLS;
-                  const y = () => Math.floor(idxAccessor() / GOL_COLS);
-                  return (
-                    <div
-                      class={CELL_CLASSES[cells[idxAccessor()]] || CELL_CLASSES[0]}
-                      onPointerDown={(e: PointerEvent) => {
-                        e.preventDefault();
-                        tapCell(x(), y());
-                      }}
-                    />
-                  );
-                }}
+                {(idxAccessor) => (
+                  <div
+                    class={CELL_CLASSES[cells[idxAccessor()]] || CELL_CLASSES[0]}
+                    onPointerDown={(e: PointerEvent) => {
+                      e.preventDefault();
+                      const i = idxAccessor();
+                      tapCell(i % GOL_COLS, (i / GOL_COLS) | 0);
+                    }}
+                  />
+                )}
               </For>
             </div>
           </Show>

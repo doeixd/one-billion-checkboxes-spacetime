@@ -627,13 +627,16 @@ export const run_gol_tick = spacetimedb.reducer(
     // 4. Advance in-memory state: current ← next for the next tick.
     _golCurrentBuf.set(_golNextBuf);
 
-    // 5. Write diff row (single broadcast per tick).
-    const diffRow = ctx.db.golDiff.id.find(0);
-    const diffSlice = _golDiffBuf.slice(0, diffLen);
-    if (diffRow) {
-      ctx.db.golDiff.id.update({ id: 0, data: diffSlice });
-    } else {
-      ctx.db.golDiff.insert({ id: 0, data: diffSlice });
+    // 5. Write diff row (single broadcast per tick). Skip when idle to avoid
+    //    broadcasting an empty byte array every 2s.
+    if (diffLen > 0) {
+      const diffRow = ctx.db.golDiff.id.find(0);
+      const diffSlice = _golDiffBuf.slice(0, diffLen);
+      if (diffRow) {
+        ctx.db.golDiff.id.update({ id: 0, data: diffSlice });
+      } else {
+        ctx.db.golDiff.insert({ id: 0, data: diffSlice });
+      }
     }
 
     // 6. Update generation counter.
