@@ -34,6 +34,7 @@ window.addEventListener('popstate', () => setCurrentPath(window.location.pathnam
 
 const onConnect = (conn: DbConnection, _identity: Identity, token: string) => {
   localStorage.setItem(TOKEN_KEY, token);
+  wasConnected = true;
   setIsConnected(true);
 
   // Register browser fingerprint for rate limiting (fire-and-forget)
@@ -41,6 +42,8 @@ const onConnect = (conn: DbConnection, _identity: Identity, token: string) => {
     conn.reducers.registerFingerprint({ fingerprint: result.visitorId });
   });
 };
+
+let wasConnected = false;
 
 const onDisconnect = () => {
   setIsConnected(false);
@@ -59,6 +62,15 @@ export const conn = DbConnection.builder()
   .onDisconnect(onDisconnect)
   .onConnectError(onConnectError)
   .build();
+
+// Reload when tab regains focus if a previously active connection dropped —
+// re-establishes subscriptions cleanly. The wasConnected guard prevents
+// reloading during initial connection setup.
+document.addEventListener('visibilitychange', () => {
+  if (document.visibilityState === 'visible' && wasConnected && !isConnected()) {
+    window.location.reload();
+  }
+});
 
 render(() => (
   <Show when={currentPath() === '/life'} fallback={<App />}>
