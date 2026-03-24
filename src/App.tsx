@@ -26,6 +26,7 @@ import {
 } from "solid-js";
 import { conn, isConnected } from "./main.tsx";
 import type { EventContext } from "./module_bindings/index.ts";
+import type { SubscriptionHandle } from "./module_bindings/index.ts";
 import type { Checkboxes } from "./module_bindings/types.ts";
 
 // ─── Constants ────────────────────────────────────────────────────────────────
@@ -83,8 +84,9 @@ export default function App() {
   const [numCheckedBoxes, setNumCheckedBoxes] = createSignal(0);
   const docColorCounts = new Map<number, number>();
 
-  // ── Async subscription + canvas readiness ─────────────────────────────
+  // ── Async subscription + grid readiness ──────────────────────────────
   let resolveSubscription!: () => void;
+  let subscriptionResolved = false;
   const subscriptionPromise = new Promise<void>((res) => {
     resolveSubscription = res;
   });
@@ -93,20 +95,16 @@ export default function App() {
 
   const gridReady = createMemo(async () => {
     await subscriptionPromise;
-    await new Promise<void>((res) => {
-      const check = () => {
-        if (containerMeasured()) {
-          res();
-          return;
-        }
-        requestAnimationFrame(check);
-      };
-      check();
-    });
     return true as const;
   });
 
   const isSyncing = () => isPending(() => gridReady());
+
+  // ── Viewport-scoped subscription ────────────────────────────────────
+  let currentSubHandle: SubscriptionHandle | null = null;
+  let subscribedMin = -1;
+  let subscribedMax = -1;
+  let subDebounceTimer = 0;
 
   // ── Pending optimistic writes ─────────────────────────────────────────
   const [pendingUpdates, setPendingUpdates] = createSignal(
@@ -147,6 +145,10 @@ export default function App() {
       obs.disconnect();
       cancelAnimationFrame(rafId);
       clearTimeout(roundTripFadeTimer);
+      clearTimeout(subDebounceTimer);
+      if (currentSubHandle && !currentSubHandle.isEnded()) {
+        currentSubHandle.unsubscribe();
+      }
     });
 
     // SpacetimeDB event handlers
@@ -199,12 +201,20 @@ export default function App() {
       const oldCount = docColorCounts.get(row.idx) ?? 0;
       docColorCounts.delete(row.idx);
       setNumCheckedBoxes((prev) => prev - oldCount);
-    });
 
-    conn
-      .subscriptionBuilder()
-      .onApplied(() => resolveSubscription())
-      .subscribe(["SELECT * FROM checkboxes"]);
+      // Clean up pending/inflight state for unsubscribed docs
+      setPendingUpdates((prev) => {
+        if (!prev.has(row.idx)) return prev;
+        const next = new Map(prev);
+        next.delete(row.idx);
+        return next;
+      });
+      const inflight = inflightDocs.get(row.idx);
+      if (inflight) {
+        inflightDocs.delete(row.idx);
+        setPendingToggleCount((c) => Math.max(0, c - inflight.count));
+      }
+    });
   });
 
   // ── Derived scroll values ─────────────────────────────────────────────
@@ -232,6 +242,96 @@ export default function App() {
   // Fixed pool of column indices [0, 1, 2, ... numColumns-1]
   const colPool = createMemo(() =>
     Array.from({ length: numColumns() }, (_, i) => i),
+  );
+
+  // ── Viewport-scoped subscription management ──────────────────────────
+
+  /** Compute the document index range visible on screen (with buffer). */
+  const visibleDocRange = () => {
+    if (!containerMeasured()) return null;
+    const cols = numColumns();
+    if (cols <= 0) return null;
+
+    const visibleRows = poolRows();
+    const bufferRows = visibleRows * 3; // 3x viewport buffer
+    const firstRow = Math.max(0, startRow() - bufferRows);
+    const lastRow = Math.min(numRows() - 1, startRow() + visibleRows + bufferRows);
+
+    const firstGlobal = firstRow * cols;
+    const lastGlobal = Math.min(lastRow * cols + cols - 1, NUM_BOXES - 1);
+
+    const span = lastGlobal - firstGlobal + 1;
+    if (span >= NUM_DOCUMENTS) {
+      return { min: 0, max: NUM_DOCUMENTS - 1, wraps: false };
+    }
+
+    const minDoc = firstGlobal % NUM_DOCUMENTS;
+    const maxDoc = lastGlobal % NUM_DOCUMENTS;
+    return { min: minDoc, max: maxDoc, wraps: maxDoc < minDoc };
+  };
+
+  /** Check if a doc index falls within the currently subscribed range. */
+  const isInSubscribedRange = (docIdx: number) => {
+    if (subscribedMin === -1) return false;
+    if (subscribedMax < subscribedMin) {
+      // wraps around
+      return docIdx >= subscribedMin || docIdx <= subscribedMax;
+    }
+    return docIdx >= subscribedMin && docIdx <= subscribedMax;
+  };
+
+  /** Subscribe to the given document range, swapping out the old subscription. */
+  const subscribeToRange = (range: { min: number; max: number; wraps: boolean }) => {
+    const queries = range.wraps
+      ? [
+          `SELECT * FROM checkboxes WHERE idx >= ${range.min}`,
+          `SELECT * FROM checkboxes WHERE idx <= ${range.max}`,
+        ]
+      : [`SELECT * FROM checkboxes WHERE idx >= ${range.min} AND idx <= ${range.max}`];
+
+    const oldHandle = currentSubHandle;
+    currentSubHandle = conn
+      .subscriptionBuilder()
+      .onApplied(() => {
+        // Unsubscribe old after new is applied — ensures no gap
+        if (oldHandle && !oldHandle.isEnded()) {
+          oldHandle.unsubscribe();
+        }
+        if (!subscriptionResolved) {
+          subscriptionResolved = true;
+          resolveSubscription();
+        }
+      })
+      .subscribe(queries);
+
+    subscribedMin = range.min;
+    subscribedMax = range.max;
+  };
+
+  /** Effect: watch visible range and update subscription when needed. */
+  createEffect(
+    () => visibleDocRange(),
+    (range) => {
+      if (!range) return;
+
+      // First subscription — immediate
+      if (subscribedMin === -1) {
+        subscribeToRange(range);
+        return;
+      }
+
+      // Only resubscribe if visible edge has moved outside subscribed range
+      if (isInSubscribedRange(range.min) && isInSubscribedRange(range.max)) {
+        return;
+      }
+
+      // Debounce to avoid thrashing during fast scroll
+      clearTimeout(subDebounceTimer);
+      subDebounceTimer = window.setTimeout(() => {
+        const fresh = visibleDocRange();
+        if (fresh) subscribeToRange(fresh);
+      }, 200);
+    },
   );
 
   // ── Side effects ──────────────────────────────────────────────────────
