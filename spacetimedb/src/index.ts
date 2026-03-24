@@ -30,7 +30,7 @@ const GOL_COLS = 50;
 const GOL_ROWS = 50;
 const GOL_CELL_COUNT = GOL_COLS * GOL_ROWS; // 2500
 const GOL_CHUNK_BYTES = GOL_COLS / 2;       // 25 bytes per row (nibble-packed)
-const GOL_TICK_INTERVAL_US = 500_000n;      // 500ms — normal (board is active)
+const GOL_TICK_INTERVAL_US = 33_333n;         // ~33ms — 30 fps when board is active
 const GOL_TICK_INTERVAL_IDLE_US = 2_000_000n; // 2s — board is stable, slow down
 
 // --- Game of Life pre-allocated buffers (reused every tick; no per-tick allocation) ---
