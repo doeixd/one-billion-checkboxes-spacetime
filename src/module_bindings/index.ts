@@ -46,6 +46,7 @@ import ToggleReducer from "./toggle_reducer";
 // Import all table schema definitions
 import CheckboxChangesRow from "./checkbox_changes_table";
 import CheckboxesRow from "./checkboxes_table";
+import GolDiffRow from "./gol_diff_table";
 import GolGridRow from "./gol_grid_table";
 import GolMetaRow from "./gol_meta_table";
 import GolRowChunkRow from "./gol_row_chunk_table";
@@ -77,6 +78,17 @@ const tablesSchema = __schema({
       { name: 'checkboxes_idx_key', constraint: 'unique', columns: ['idx'] },
     ],
   }, CheckboxesRow),
+  golDiff: __table({
+    name: 'gol_diff',
+    indexes: [
+      { accessor: 'id', name: 'gol_diff_id_idx_btree', algorithm: 'btree', columns: [
+        'id',
+      ] },
+    ],
+    constraints: [
+      { name: 'gol_diff_id_key', constraint: 'unique', columns: ['id'] },
+    ],
+  }, GolDiffRow),
   golGrid: __table({
     name: 'gol_grid',
     indexes: [

@@ -33,10 +33,14 @@ const GOL_CHUNK_BYTES = GOL_COLS / 2;       // 25 bytes per row (nibble-packed)
 const GOL_TICK_INTERVAL_US = 50_000n;         // 50ms — 20 fps when board is active
 const GOL_TICK_INTERVAL_IDLE_US = 2_000_000n; // 2s — board is stable, slow down
 
+const GOL_SNAPSHOT_INTERVAL = 50; // sync row chunks every N ticks (for new client state)
+
 // --- Game of Life pre-allocated buffers (reused every tick; no per-tick allocation) ---
 const _golCurrentBuf = new Uint8Array(GOL_CELL_COUNT);
 const _golNextBuf    = new Uint8Array(GOL_CELL_COUNT);
 const _golNbuf       = new Uint8Array(8);
+// Diff buffer: worst case 2500 cells change × 3 bytes each = 7500 bytes.
+const _golDiffBuf    = new Uint8Array(GOL_CELL_COUNT * 3);
 
 // --- Nibble manipulation helpers ---
 
@@ -115,9 +119,8 @@ const GolTickJob = table({
 });
 
 // GOL grid: one row per GOL row (50 rows × 25 bytes nibble-packed).
-// SpacetimeDB only broadcasts rows that actually change each tick — on a typical
-// sparse/stable board that is far fewer than the full 50 rows, giving proportional
-// bandwidth savings over a single monolithic row.
+// Used for initial client state on subscribe and periodic snapshots (every
+// GOL_SNAPSHOT_INTERVAL ticks). Live per-tick updates go through gol_diff.
 const GolRowChunk = table(
   { name: 'gol_row_chunk', public: true },
   {
@@ -132,6 +135,17 @@ const GolMeta = table(
   {
     id:         t.u32().primaryKey(),
     generation: t.u64(),
+  }
+);
+
+// Per-tick diff: single row containing packed cell changes [x, y, color, ...].
+// Clients subscribe to this instead of gol_row_chunk for live updates — one
+// WebSocket message per tick instead of up to 50 row-chunk updates.
+const GolDiff = table(
+  { name: 'gol_diff', public: true },
+  {
+    id:   t.u32().primaryKey(),
+    data: t.byteArray(), // packed triples: [x, y, color, x, y, color, ...]
   }
 );
 
@@ -203,6 +217,7 @@ const spacetimedb = schema({
   ),
   golRowChunk: GolRowChunk,
   golMeta: GolMeta,
+  golDiff: GolDiff,
   golTickJob: GolTickJob,
 });
 export default spacetimedb;
@@ -498,6 +513,7 @@ function golNextGeneration(cells: Uint8Array, seed: number): Uint8Array {
 function ensureGolGrid(ctx: any): void {
   if (ctx.db.golMeta.id.find(0)) return; // already initialised
   ctx.db.golMeta.insert({ id: 0, generation: 0n });
+  ctx.db.golDiff.insert({ id: 0, data: new Uint8Array(0) });
   for (let rowIdx = 0; rowIdx < GOL_ROWS; rowIdx++) {
     ctx.db.golRowChunk.insert({ rowIdx, cells: new Uint8Array(GOL_CHUNK_BYTES) });
   }
@@ -563,13 +579,13 @@ export const gol_tap_cell = spacetimedb.reducer(
 /**
  * Scheduled reducer: advance one GOL generation and always reschedule.
  *
- * Optimisations applied here:
- *   1. Reads current state into the pre-allocated _golCurrentBuf (no per-tick alloc).
- *   2. Computes next gen into _golNextBuf (no per-tick alloc).
- *   3. Only writes row-chunks that actually changed — SpacetimeDB broadcasts only
- *      those rows, so sparse/stable boards send far less data per tick.
- *   4. Adaptive tick rate: 500 ms while the board is active, 2 s when it's stable,
- *      cutting both CPU time and bandwidth on quiescent boards.
+ * Bandwidth strategy:
+ *   - Every tick: write a single gol_diff row with packed cell-level changes
+ *     [x, y, color, ...]. One WebSocket message per tick regardless of how
+ *     many cells changed.
+ *   - Every GOL_SNAPSHOT_INTERVAL ticks: sync gol_row_chunk so new clients
+ *     joining mid-game get a recent snapshot.
+ *   - Adaptive tick rate: 50ms active, 2s idle.
  */
 export const run_gol_tick = spacetimedb.reducer(
   { arg: GolTickJob.rowType },
@@ -589,39 +605,47 @@ export const run_gol_tick = spacetimedb.reducer(
     const seed = Number(ctx.timestamp.microsSinceUnixEpoch & 0xFFFFFFFFn);
     golNextGeneration(_golCurrentBuf, seed);
 
-    // 3. Write back only changed row chunks (nibble-packed).
-    let anyChanged = false;
-    for (let rowIdx = 0; rowIdx < GOL_ROWS; rowIdx++) {
-      const base = rowIdx * GOL_COLS;
-
-      // Fast row-level diff: skip write if this row is identical.
-      let rowChanged = false;
-      for (let x = 0; x < GOL_COLS; x++) {
-        if (_golNextBuf[base + x] !== _golCurrentBuf[base + x]) {
-          rowChanged = true;
-          break;
-        }
-      }
-      if (!rowChanged) continue;
-
-      anyChanged = true;
-      const newCells = new Uint8Array(GOL_CHUNK_BYTES);
-      for (let x = 0; x < GOL_COLS; x++) setColor(newCells, x, _golNextBuf[base + x]);
-
-      const existing = ctx.db.golRowChunk.rowIdx.find(rowIdx);
-      if (existing) {
-        ctx.db.golRowChunk.rowIdx.update({ rowIdx, cells: newCells });
-      } else {
-        ctx.db.golRowChunk.insert({ rowIdx, cells: newCells });
+    // 3. Build cell-level diff into pre-allocated buffer.
+    let diffLen = 0;
+    for (let i = 0; i < GOL_CELL_COUNT; i++) {
+      if (_golNextBuf[i] !== _golCurrentBuf[i]) {
+        _golDiffBuf[diffLen++] = i % GOL_COLS;              // x
+        _golDiffBuf[diffLen++] = (i / GOL_COLS) | 0;        // y
+        _golDiffBuf[diffLen++] = _golNextBuf[i];             // color
       }
     }
 
-    // 4. Update generation counter.
-    const meta = ctx.db.golMeta.id.find(0)!;
-    ctx.db.golMeta.id.update({ ...meta, generation: meta.generation + 1n });
+    // 4. Write diff row (single broadcast per tick).
+    const diffRow = ctx.db.golDiff.id.find(0);
+    const diffSlice = _golDiffBuf.slice(0, diffLen);
+    if (diffRow) {
+      ctx.db.golDiff.id.update({ id: 0, data: diffSlice });
+    } else {
+      ctx.db.golDiff.insert({ id: 0, data: diffSlice });
+    }
 
-    // 5. Adaptive reschedule: slow down when the board is stable.
-    const interval = anyChanged ? GOL_TICK_INTERVAL_US : GOL_TICK_INTERVAL_IDLE_US;
+    // 5. Update generation counter.
+    const meta = ctx.db.golMeta.id.find(0)!;
+    const gen = meta.generation + 1n;
+    ctx.db.golMeta.id.update({ ...meta, generation: gen });
+
+    // 6. Periodically sync row chunks for new-client snapshots.
+    if (diffLen > 0 && Number(gen % BigInt(GOL_SNAPSHOT_INTERVAL)) === 0) {
+      for (let rowIdx = 0; rowIdx < GOL_ROWS; rowIdx++) {
+        const base = rowIdx * GOL_COLS;
+        const newCells = new Uint8Array(GOL_CHUNK_BYTES);
+        for (let x = 0; x < GOL_COLS; x++) setColor(newCells, x, _golNextBuf[base + x]);
+        const existing = ctx.db.golRowChunk.rowIdx.find(rowIdx);
+        if (existing) {
+          ctx.db.golRowChunk.rowIdx.update({ rowIdx, cells: newCells });
+        } else {
+          ctx.db.golRowChunk.insert({ rowIdx, cells: newCells });
+        }
+      }
+    }
+
+    // 7. Adaptive reschedule: slow down when the board is stable.
+    const interval = diffLen > 0 ? GOL_TICK_INTERVAL_US : GOL_TICK_INTERVAL_IDLE_US;
     ctx.db.golTickJob.insert({
       scheduledId: 0n,
       scheduledAt: ScheduleAt.time(ctx.timestamp.microsSinceUnixEpoch + interval),

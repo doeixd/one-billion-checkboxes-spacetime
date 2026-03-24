@@ -29,7 +29,7 @@ import {
 } from "solid-js";
 import { conn, isConnected } from "./main.tsx";
 import type { EventContext } from "./module_bindings/index.ts";
-import type { GolRowChunk, GolMeta } from "./module_bindings/types.ts";
+import type { GolRowChunk, GolMeta, GolDiff } from "./module_bindings/types.ts";
 import "./gol.css";
 
 const GOL_COLS = 50;
@@ -78,6 +78,7 @@ export default function GameOfLife() {
   const _decodeBuf = new Uint8Array(GOL_COLS);
 
   onSettled(() => {
+    // Row chunks: used for initial snapshot (and periodic syncs for late joiners).
     const handleChunk = (chunk: GolRowChunk) => {
       const base = chunk.rowIdx * GOL_COLS;
       const bytes = chunk.cells as Uint8Array;
@@ -101,6 +102,27 @@ export default function GameOfLife() {
       handleChunk(row),
     );
 
+    // Diff: packed [x, y, color, ...] triples — one message per tick.
+    const handleDiff = (diff: GolDiff) => {
+      const data = diff.data as Uint8Array;
+      if (data.length === 0) return;
+      setCells((s: number[]) => {
+        for (let i = 0; i + 2 < data.length; i += 3) {
+          const idx = data[i + 1] * GOL_COLS + data[i]; // y * cols + x
+          const color = data[i + 2];
+          if (s[idx] !== color) s[idx] = color;
+        }
+      });
+    };
+
+    conn.db.golDiff.onInsert((_ctx: EventContext, row: GolDiff) =>
+      handleDiff(row),
+    );
+    conn.db.golDiff.onUpdate((_ctx: EventContext, _old: GolDiff, row: GolDiff) =>
+      handleDiff(row),
+    );
+
+    // Meta: generation counter.
     conn.db.golMeta.onInsert((_ctx: EventContext, row: GolMeta) =>
       setGeneration(row.generation),
     );
@@ -112,6 +134,7 @@ export default function GameOfLife() {
       .onApplied(() => resolveSubscription())
       .subscribe([
         "SELECT * FROM gol_row_chunk",
+        "SELECT * FROM gol_diff",
         "SELECT * FROM gol_meta",
       ]);
   });
