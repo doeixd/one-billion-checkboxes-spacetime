@@ -157,8 +157,42 @@ export default function App() {
   const [size, setSize] = createSignal({ width: 0, height: 0 });
   const [scrollTop, setScrollTop] = createSignal(0);
 
+  // ── Offset (3-way: scroll ↔ input ↔ URL query param) ─────────────────
+  const initialOffset = (() => {
+    const p = new URLSearchParams(window.location.search).get("offset");
+    const n = p ? parseInt(p, 10) : NaN;
+    return Number.isFinite(n) && n >= 0 && n < NUM_BOXES ? n : 0;
+  })();
+  const [currentOffset, setCurrentOffset] = createSignal(initialOffset);
+  // When true, the scroll handler won't update currentOffset (prevents loop)
+  let scrollFromInput = false;
+
+  /** Scroll the grid to a global checkbox index. */
+  const scrollToOffset = (offset: number) => {
+    if (!scrollRef) return;
+    const cols = numColumns();
+    if (cols <= 0) return;
+    const row = Math.floor(offset / cols);
+    scrollFromInput = true;
+    scrollRef.scrollTop = row * CELL_SIZE;
+    setScrollTop(scrollRef.scrollTop);
+    requestAnimationFrame(() => { scrollFromInput = false; });
+  };
+
+  /** Sync offset → URL query param. */
+  const syncOffsetToUrl = (offset: number) => {
+    const url = new URL(window.location.href);
+    if (offset > 0) {
+      url.searchParams.set("offset", String(offset));
+    } else {
+      url.searchParams.delete("offset");
+    }
+    history.replaceState(null, "", url);
+  };
+
   // ── One-time setup after mount ────────────────────────────────────────
   let rafId = 0;
+  let urlUpdateTimer = 0;
 
   onSettled(() => {
     const obs = new ResizeObserver((entries) => {
@@ -176,6 +210,7 @@ export default function App() {
       clearTimeout(roundTripFadeTimer);
       clearTimeout(subDebounceTimer);
       clearTimeout(inflightGcTimer);
+      clearTimeout(urlUpdateTimer);
       if (currentSubHandle && !currentSubHandle.isEnded()) {
         currentSubHandle.unsubscribe();
       }
@@ -494,6 +529,17 @@ export default function App() {
       if (!scrollRef) return;
       setScrollTop(scrollRef.scrollTop);
       setScrollbarWidth(scrollRef.offsetWidth - scrollRef.clientWidth);
+
+      // Scroll → offset + URL (skip if this scroll was triggered by input)
+      if (!scrollFromInput) {
+        const cols = numColumns();
+        const topRow = Math.floor(scrollRef.scrollTop / CELL_SIZE);
+        const offset = topRow * cols;
+        setCurrentOffset(offset);
+
+        clearTimeout(urlUpdateTimer);
+        urlUpdateTimer = window.setTimeout(() => syncOffsetToUrl(offset), 300);
+      }
     });
   };
 
@@ -663,11 +709,60 @@ export default function App() {
               color: "#6b7280",
               "font-size": "0.8rem",
               "margin-top": "2px",
+              display: "flex",
+              "align-items": "baseline",
+              gap: "6px",
             }}
           >
-            {!statsReady()
-              ? "Connecting…"
-              : `${(Number(totalColored()) + pendingCountDelta()).toLocaleString()} colored`}
+            <span>
+              {!statsReady()
+                ? "Connecting…"
+                : `${(Number(totalColored()) + pendingCountDelta()).toLocaleString()} colored`}
+            </span>
+            <Show when={statsReady()}>
+              <span style={{ color: "#d1d5db" }}>·</span>
+              <span style={{ display: "inline-flex", "align-items": "baseline", gap: "2px" }}>
+                <span style={{ color: "#9ca3af", "font-size": "0.75rem" }}>#</span>
+                <input
+                  type="text"
+                  inputmode="numeric"
+                  value={currentOffset().toLocaleString()}
+                  onFocus={(e) => {
+                    // Switch to raw number for easy editing
+                    e.currentTarget.value = String(currentOffset());
+                    e.currentTarget.select();
+                  }}
+                  onBlur={(e) => {
+                    // Reformat with commas on blur
+                    e.currentTarget.value = currentOffset().toLocaleString();
+                  }}
+                  onKeyDown={(e) => {
+                    if (e.key === "Enter") {
+                      const raw = e.currentTarget.value.replace(/[^0-9]/g, "");
+                      const n = parseInt(raw, 10);
+                      if (Number.isFinite(n) && n >= 0 && n < NUM_BOXES) {
+                        setCurrentOffset(n);
+                        scrollToOffset(n);
+                        syncOffsetToUrl(n);
+                      }
+                      e.currentTarget.blur();
+                    }
+                    if (e.key === "Escape") e.currentTarget.blur();
+                  }}
+                  style={{
+                    width: "8ch",
+                    border: "none",
+                    "border-bottom": "1px solid #d1d5db",
+                    background: "transparent",
+                    color: "#6b7280",
+                    "font-size": "0.8rem",
+                    "font-family": "inherit",
+                    padding: "0",
+                    outline: "none",
+                  }}
+                />
+              </span>
+            </Show>
           </div>
         </div>
 
@@ -796,6 +891,7 @@ export default function App() {
                 scrollRef = el;
                 requestAnimationFrame(() => {
                   setScrollbarWidth(el.offsetWidth - el.clientWidth);
+                  if (initialOffset > 0) scrollToOffset(initialOffset);
                 });
               }}
               style={{ width: "100%", height: "100%", overflow: "auto" }}
