@@ -1,5 +1,5 @@
 /**
- * Main UI — renders a virtual grid of 1,000,000,000 checkboxes via canvas.
+ * Main UI — renders a virtual grid of 1,000,000,000 checkboxes.
  *
  * Data model:
  *   1B checkboxes across 250,000 DB rows ("documents").
@@ -8,9 +8,10 @@
  *   Checkbox N maps to: documentIdx = N % 250000, arrayIdx = floor(N / 250000).
  *
  * Rendering:
- *   A single <canvas> draws visible cells. A scroll container beneath provides
- *   the native scrollbar. The canvas is sized to exclude the scrollbar width.
- *   Repaints are driven by a reactive effect tracking scroll, size, and data.
+ *   A fixed pool of real DOM elements fills the viewport + overscan. On scroll,
+ *   each cell's reactive index updates; SolidJS's fine-grained reactivity only
+ *   touches DOM nodes whose color actually changed. CSS transitions, hover
+ *   states, and accessibility come free from real elements.
  */
 import {
   createSignal,
@@ -32,6 +33,7 @@ import type { Checkboxes } from './module_bindings/types.ts';
 const NUM_BOXES = 1_000_000_000;
 const NUM_DOCUMENTS = 250_000;
 const CELL_SIZE = 22; // px
+const OVERSCAN = 3;   // extra rows above/below viewport
 
 const PALETTE: string[] = [
   '#f3f4f6', // 0: clear / uncheck
@@ -86,17 +88,13 @@ export default function App() {
   let resolveSubscription!: () => void;
   const subscriptionPromise = new Promise<void>(res => { resolveSubscription = res; });
 
-  // Single async memo gates <Loading> — resolves when subscription data
-  // is loaded AND the container has been measured (so canvas can paint).
   const [containerMeasured, setContainerMeasured] = createSignal(false);
 
   const gridReady = createMemo(async () => {
     await subscriptionPromise;
-    // Wait for container measurement before resolving
     await new Promise<void>(res => {
       const check = () => {
         if (containerMeasured()) { res(); return; }
-        // Poll briefly — ResizeObserver fires within a frame or two
         requestAnimationFrame(check);
       };
       check();
@@ -104,7 +102,6 @@ export default function App() {
     return true as const;
   });
 
-  // isPending() read OUTSIDE <Loading> so the header observes but never suspends.
   const isSyncing = () => isPending(() => gridReady());
 
   // ── Pending optimistic writes ─────────────────────────────────────────
@@ -113,7 +110,6 @@ export default function App() {
   );
 
   // ── Round-trip timing ─────────────────────────────────────────────────
-  // Per-document: { time: earliest pending timestamp, count: toggles in-flight }
   const inflightDocs = new Map<number, { time: number; count: number }>();
   const [pendingToggleCount, setPendingToggleCount] = createSignal(0);
   const [lastRoundTripMs, setLastRoundTripMs] = createSignal<number | null>(null);
@@ -125,31 +121,22 @@ export default function App() {
   // ── Virtual scroll state ──────────────────────────────────────────────
   let containerRef!: HTMLDivElement;
   let scrollRef!: HTMLDivElement;
-  let canvasRef!: HTMLCanvasElement;
   const [size, setSize] = createSignal({ width: 0, height: 0 });
   const [scrollTop, setScrollTop] = createSignal(0);
-  const [scrollbarWidth, setScrollbarWidth] = createSignal(0);
-
-  /** Measure scrollbar width from the scroll container. */
-  const measureScrollbar = () => {
-    if (scrollRef) {
-      setScrollbarWidth(scrollRef.offsetWidth - scrollRef.clientWidth);
-    }
-  };
 
   // ── One-time setup after mount ────────────────────────────────────────
+  let rafId = 0;
+
   onSettled(() => {
     const obs = new ResizeObserver((entries) => {
       const e = entries[0];
       if (e) {
         setSize({ width: e.contentRect.width, height: e.contentRect.height });
         if (!containerMeasured()) setContainerMeasured(true);
-        measureScrollbar();
       }
     });
     obs.observe(containerRef);
 
-    // 2.0 cleanup: return from onSettled cleans up on unmount
     onCleanup(() => {
       obs.disconnect();
       cancelAnimationFrame(rafId);
@@ -166,7 +153,6 @@ export default function App() {
       docColorCounts.set(row.idx, newCount);
       setNumCheckedBoxes(prev => prev + newCount - oldCount);
 
-      // Clear pending optimistic overlay
       setPendingUpdates(prev => {
         if (!prev.has(row.idx)) return prev;
         const next = new Map(prev);
@@ -174,7 +160,6 @@ export default function App() {
         return next;
       });
 
-      // Compute round-trip time
       const inflight = inflightDocs.get(row.idx);
       if (inflight) {
         inflightDocs.delete(row.idx);
@@ -207,8 +192,26 @@ export default function App() {
   const numColumns = () => Math.max(1, Math.floor(size().width / CELL_SIZE));
   const numRows = () => Math.ceil(NUM_BOXES / numColumns());
   const totalHeight = () => numRows() * CELL_SIZE;
-  const canvasWidth = () => Math.max(0, size().width - scrollbarWidth());
-  const canvasHeight = () => size().height;
+
+  // The first visible row (with overscan above)
+  const startRow = () =>
+    Math.max(0, Math.floor(scrollTop() / CELL_SIZE) - OVERSCAN);
+
+  // How many rows fit in the viewport + overscan on both sides
+  const poolRows = () => {
+    const visible = Math.ceil(size().height / CELL_SIZE);
+    return Math.min(visible + OVERSCAN * 2, numRows());
+  };
+
+  // Fixed pool of local row indices [0, 1, 2, ... poolRows-1]
+  const rowPool = createMemo(() =>
+    Array.from({ length: poolRows() }, (_, i) => i),
+  );
+
+  // Fixed pool of column indices [0, 1, 2, ... numColumns-1]
+  const colPool = createMemo(() =>
+    Array.from({ length: numColumns() }, (_, i) => i),
+  );
 
   // ── Side effects ──────────────────────────────────────────────────────
 
@@ -220,32 +223,29 @@ export default function App() {
   );
 
   // ── Scroll handler (rAF-throttled) ────────────────────────────────────
-  let rafId = 0;
   const onScroll = () => {
     cancelAnimationFrame(rafId);
     rafId = requestAnimationFrame(() => {
       if (!scrollRef) return;
       setScrollTop(scrollRef.scrollTop);
-      measureScrollbar();
     });
   };
 
   // ── Toggle handler ────────────────────────────────────────────────────
   const loading = () => !isConnected() || !gridReady();
 
+  /** Look up effective color for a cell (pending overlay first, then base). */
+  const getCellColor = (documentIdx: number, arrayIdx: number): number => {
+    const docPending = pendingUpdates().get(documentIdx);
+    if (docPending?.has(arrayIdx)) return docPending.get(arrayIdx)!;
+    const docBoxes = boxesMap().get(documentIdx);
+    return docBoxes ? getColor(docBoxes, arrayIdx) : 0;
+  };
+
   const toggle = (documentIdx: number, arrayIdx: number) => {
     if (loading()) return;
 
-    const base = boxesMap().get(documentIdx);
-    const pending = pendingUpdates().get(documentIdx);
-
-    let currentColor = 0;
-    if (pending?.has(arrayIdx)) {
-      currentColor = pending.get(arrayIdx)!;
-    } else if (base) {
-      currentColor = getColor(base, arrayIdx);
-    }
-
+    const currentColor = getCellColor(documentIdx, arrayIdx);
     const newColor =
       currentColor === selectedColor() && selectedColor() !== 0 ? 0 : selectedColor();
 
@@ -257,7 +257,6 @@ export default function App() {
       return next;
     });
 
-    // Track round-trip timing — keep earliest timestamp per doc, increment count
     const existing = inflightDocs.get(documentIdx);
     inflightDocs.set(documentIdx, {
       time: existing?.time ?? performance.now(),
@@ -267,139 +266,6 @@ export default function App() {
 
     conn.reducers.toggle({ documentIdx, arrayIdx, color: newColor });
   };
-
-  // ── Canvas paint ──────────────────────────────────────────────────────
-
-  const getCellColor = (
-    boxes: Map<number, number[]>,
-    pending: Map<number, Map<number, number>>,
-    documentIdx: number,
-    arrayIdx: number,
-  ): number => {
-    const docPending = pending.get(documentIdx);
-    if (docPending?.has(arrayIdx)) return docPending.get(arrayIdx)!;
-    const docBoxes = boxes.get(documentIdx);
-    return docBoxes ? getColor(docBoxes, arrayIdx) : 0;
-  };
-
-  let cachedCtx: CanvasRenderingContext2D | null = null;
-  let lastDpr = 0;
-
-  const paintGrid = () => {
-    const canvas = canvasRef;
-    if (!canvas) return;
-
-    const cw = canvasWidth();
-    const ch = canvasHeight();
-    if (cw <= 0 || ch <= 0) return;
-
-    const dpr = window.devicePixelRatio || 1;
-    const bufW = Math.round(cw * dpr);
-    const bufH = Math.round(ch * dpr);
-
-    if (canvas.width !== bufW || canvas.height !== bufH) {
-      canvas.width = bufW;
-      canvas.height = bufH;
-      cachedCtx = null;
-    }
-
-    if (!cachedCtx || dpr !== lastDpr) {
-      cachedCtx = canvas.getContext('2d', { alpha: false })!;
-      if (!cachedCtx) return;
-      cachedCtx.setTransform(dpr, 0, 0, dpr, 0, 0);
-      lastDpr = dpr;
-    }
-
-    const ctx2d = cachedCtx;
-    ctx2d.fillStyle = '#fff';
-    ctx2d.fillRect(0, 0, cw, ch);
-
-    const cols = numColumns();
-    const sTop = scrollTop();
-    const firstRow = Math.max(0, Math.floor(sTop / CELL_SIZE));
-    const lastRow = Math.min(numRows() - 1, Math.ceil((sTop + ch) / CELL_SIZE));
-    const boxes = boxesMap();
-    const pending = pendingUpdates();
-
-    const innerSize = CELL_SIZE - 2;
-
-    // Pass 1: empty cell borders
-    ctx2d.strokeStyle = '#e5e7eb';
-    ctx2d.lineWidth = 1;
-    for (let row = firstRow; row <= lastRow; row++) {
-      const y = row * CELL_SIZE - sTop;
-      for (let col = 0; col < cols; col++) {
-        const index = row * cols + col;
-        if (index >= NUM_BOXES) break;
-
-        const documentIdx = index % NUM_DOCUMENTS;
-        const arrayIdx = Math.floor(index / NUM_DOCUMENTS);
-        const colorVal = getCellColor(boxes, pending, documentIdx, arrayIdx);
-
-        if (colorVal === 0) {
-          const cx = col * CELL_SIZE + 1.5;
-          const cy = y + 1.5;
-          ctx2d.beginPath();
-          ctx2d.roundRect(cx, cy, innerSize - 1, innerSize - 1, 3);
-          ctx2d.stroke();
-        }
-      }
-    }
-
-    // Pass 2: filled cells
-    let currentFill = '';
-    ctx2d.lineWidth = 2;
-    ctx2d.lineCap = 'round';
-    ctx2d.lineJoin = 'round';
-
-    for (let row = firstRow; row <= lastRow; row++) {
-      const y = row * CELL_SIZE - sTop;
-      for (let col = 0; col < cols; col++) {
-        const index = row * cols + col;
-        if (index >= NUM_BOXES) break;
-
-        const documentIdx = index % NUM_DOCUMENTS;
-        const arrayIdx = Math.floor(index / NUM_DOCUMENTS);
-        const colorVal = getCellColor(boxes, pending, documentIdx, arrayIdx);
-
-        if (colorVal > 0) {
-          const cx = col * CELL_SIZE + 1;
-          const cy = y + 1;
-
-          const fill = PALETTE[colorVal];
-          if (fill !== currentFill) {
-            currentFill = fill;
-            ctx2d.fillStyle = fill;
-          }
-
-          ctx2d.beginPath();
-          ctx2d.roundRect(cx, cy, innerSize, innerSize, 3);
-          ctx2d.fill();
-
-          // Checkmark
-          ctx2d.strokeStyle = '#fff';
-          ctx2d.beginPath();
-          ctx2d.moveTo(cx + innerSize * 0.22, cy + innerSize * 0.50);
-          ctx2d.lineTo(cx + innerSize * 0.42, cy + innerSize * 0.72);
-          ctx2d.lineTo(cx + innerSize * 0.78, cy + innerSize * 0.30);
-          ctx2d.stroke();
-        }
-      }
-    }
-  };
-
-  // Repaint whenever scroll, data, or size changes
-  createEffect(
-    () => {
-      scrollTop();
-      size();
-      scrollbarWidth();
-      boxesMap();
-      pendingUpdates();
-      numColumns();
-    },
-    () => paintGrid(),
-  );
 
   // ─────────────────────────────────────────────────────────────────────────
   // Render
@@ -436,7 +302,6 @@ export default function App() {
             <span style={{ 'font-weight': '700', 'font-size': '1rem' }}>
               One Billion Checkboxes
             </span>
-            {/* Connection spinner */}
             <Show when={isSyncing()}>
               <span
                 aria-label="Connecting…"
@@ -452,7 +317,7 @@ export default function App() {
                 }}
               />
             </Show>
-            {/* Toggle round-trip indicator — fixed width to prevent layout shift */}
+            {/* Toggle round-trip indicator */}
             <span style={{
               display: 'inline-flex',
               'align-items': 'center',
@@ -477,7 +342,7 @@ export default function App() {
                     animation: 'spin 0.6s linear infinite',
                   }}
                 />
-                </Show>
+              </Show>
             </span>
           </div>
           <div style={{ color: '#6b7280', 'font-size': '0.8rem', 'margin-top': '2px' }}>
@@ -572,50 +437,92 @@ export default function App() {
           </div>
         }>
           <Show when={gridReady()}>
-          {/* Scroll container — tall spacer provides the native scrollbar */}
+          {/* Scroll container with spacer for native scrollbar */}
           <div
-            ref={(el: HTMLDivElement) => {
-              scrollRef = el;
-              // Measure scrollbar as soon as the scroll container mounts
-              requestAnimationFrame(() => measureScrollbar());
-            }}
+            ref={(el: HTMLDivElement) => { scrollRef = el; }}
             style={{ width: '100%', height: '100%', overflow: 'auto' }}
             onScroll={onScroll}
           >
-            <div style={{ height: `${totalHeight()}px`, width: `${numColumns() * CELL_SIZE}px` }} />
+            {/* Spacer sets the full virtual height for scrollbar sizing */}
+            <div style={{
+              height: `${totalHeight()}px`,
+              width: `${numColumns() * CELL_SIZE}px`,
+              position: 'relative',
+            }}>
+              {/*
+                Fixed pool of DOM elements positioned via translateY.
+                On scroll, startRow changes → each cell's index updates →
+                SolidJS only touches DOM nodes whose color actually changed.
+              */}
+              <div style={{
+                position: 'absolute',
+                top: '0',
+                left: '0',
+                width: '100%',
+                transform: `translateY(${startRow() * CELL_SIZE}px)`,
+                'will-change': 'transform',
+              }}>
+                <For each={rowPool()} keyed={false}>
+                  {(localRow) => {
+                    const rowIdx = () => startRow() + localRow();
+                    return (
+                      <div style={{ display: 'flex', height: `${CELL_SIZE}px` }}>
+                        <For each={colPool()} keyed={false}>
+                          {(col) => {
+                            const globalIndex = () => rowIdx() * numColumns() + col();
+                            const documentIdx = () => globalIndex() % NUM_DOCUMENTS;
+                            const arrayIdx = () => Math.floor(globalIndex() / NUM_DOCUMENTS);
+                            const colorVal = () => {
+                              if (globalIndex() >= NUM_BOXES) return -1; // out of range
+                              return getCellColor(documentIdx(), arrayIdx());
+                            };
+                            const isColored = () => colorVal() > 0;
+                            const isVisible = () => colorVal() >= 0;
+
+                            return (
+                              <div
+                                style={{
+                                  width: `${CELL_SIZE}px`,
+                                  height: `${CELL_SIZE}px`,
+                                  padding: '1px',
+                                  visibility: isVisible() ? 'visible' : 'hidden',
+                                }}
+                              >
+                                <div
+                                  onClick={() => {
+                                    if (!isVisible() || loading()) return;
+                                    toggle(documentIdx(), arrayIdx());
+                                  }}
+                                  style={{
+                                    width: `${CELL_SIZE - 2}px`,
+                                    height: `${CELL_SIZE - 2}px`,
+                                    'background-color': isColored() ? PALETTE[colorVal()] : '#fff',
+                                    border: `1px solid ${isColored() ? PALETTE[colorVal()] : '#e5e7eb'}`,
+                                    'border-radius': '3px',
+                                    'box-sizing': 'border-box',
+                                    cursor: loading() ? 'default' : 'pointer',
+                                    transition: 'background-color 0.1s ease-out, border-color 0.1s ease-out',
+                                    display: 'flex',
+                                    'align-items': 'center',
+                                    'justify-content': 'center',
+                                    'font-size': '12px',
+                                    'line-height': '1',
+                                    color: '#fff',
+                                  }}
+                                >
+                                  {isColored() ? '✓' : ''}
+                                </div>
+                              </div>
+                            );
+                          }}
+                        </For>
+                      </div>
+                    );
+                  }}
+                </For>
+              </div>
+            </div>
           </div>
-          {/* Canvas sized to exclude the scrollbar — no overlap */}
-          <canvas
-            ref={canvasRef}
-            style={{
-              position: 'absolute',
-              top: '0',
-              left: '0',
-              width: `${canvasWidth()}px`,
-              height: `${canvasHeight()}px`,
-              cursor: loading() ? 'default' : 'pointer',
-            }}
-            onWheel={(e) => {
-              scrollRef.scrollTop += e.deltaY;
-              scrollRef.scrollLeft += e.deltaX;
-              e.preventDefault();
-            }}
-            onClick={(e) => {
-              if (loading()) return;
-              const rect = canvasRef.getBoundingClientRect();
-              const mx = e.clientX - rect.left;
-              const my = e.clientY - rect.top;
-              const col = Math.floor(mx / CELL_SIZE);
-              const row = Math.floor((my + scrollTop()) / CELL_SIZE);
-              const cols = numColumns();
-              if (col >= cols) return;
-              const index = row * cols + col;
-              if (index >= NUM_BOXES) return;
-              const documentIdx = index % NUM_DOCUMENTS;
-              const arrayIdx = Math.floor(index / NUM_DOCUMENTS);
-              toggle(documentIdx, arrayIdx);
-            }}
-          />
           </Show>
         </Loading>
       </div>
