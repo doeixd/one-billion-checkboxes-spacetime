@@ -1,0 +1,31 @@
+.gol-grid {
+  display: grid;
+  gap: 1px;
+  background-color: #1a1a2e;
+  padding: 1px;
+  user-select: none;
+  touch-action: manipulation;
+  border-radius: 4px;
+  grid-template-columns: repeat(50, var(--cell-px));
+}
+.gol-cell {
+  width: var(--cell-px);
+  height: var(--cell-px);
+  cursor: pointer;
+}
+.gol-c0  { background-color: #16162a; }
+.gol-c1  { background-color: #111827; }
+.gol-c2  { background-color: #dc2626; }
+.gol-c3  { background-color: #ea580c; }
+.gol-c4  { background-color: #d97706; }
+.gol-c5  { background-color: #16a34a; }
+.gol-c6  { background-color: #0891b2; }
+.gol-c7  { background-color: #2563eb; }
+.gol-c8  { background-color: #7c3aed; }
+.gol-c9  { background-color: #db2777; }
+.gol-c10 { background-color: #f87171; }
+.gol-c11 { background-color: #fb923c; }
+.gol-c12 { background-color: #fbbf24; }
+.gol-c13 { background-color: #4ade80; }
+.gol-c14 { background-color: #38bdf8; }
+.gol-c15 { background-color: #a78bfa; }

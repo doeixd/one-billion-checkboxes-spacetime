@@ -11,8 +11,9 @@
  *                    broadcasts rows that actually changed each tick.
  *   gol_meta       — single row; generation counter updated every tick.
  *
- * Client rendering uses granular Solid.js store updates: only the cells
- * belonging to a changed row chunk are touched, keeping DOM work minimal.
+ * Rendering: each cell is a div with a CSS class (gol-c0..gol-c15) for
+ * its color. Solid's fine-grained reactivity only touches cells whose
+ * value changed — no style objects allocated per tick.
  */
 import {
   createSignal,
@@ -21,6 +22,7 @@ import {
   createEffect,
   isPending,
   onSettled,
+  onCleanup,
   For,
   Show,
   Loading,
@@ -28,6 +30,7 @@ import {
 import { conn, isConnected } from "./main.tsx";
 import type { EventContext } from "./module_bindings/index.ts";
 import type { GolRowChunk, GolMeta } from "./module_bindings/types.ts";
+import "./gol.css";
 
 const GOL_COLS = 50;
 const GOL_ROWS = 50;
@@ -35,44 +38,8 @@ const CELL_COUNT = GOL_COLS * GOL_ROWS;
 
 const indices = Array.from({ length: CELL_COUNT }, (_, i) => i);
 
-const DEAD_COLOR = "#16162a";
-
-/** Colors for live cell payloads 1-15 (same palette as checkboxes). */
-const LIFE_PALETTE: string[] = [
-  DEAD_COLOR,  // 0: dead
-  "#111827",   // 1: near-black
-  "#dc2626",   // 2: red
-  "#ea580c",   // 3: orange
-  "#d97706",   // 4: amber
-  "#16a34a",   // 5: green
-  "#0891b2",   // 6: cyan
-  "#2563eb",   // 7: blue
-  "#7c3aed",   // 8: purple
-  "#db2777",   // 9: pink
-  "#f87171",   // 10: light red
-  "#fb923c",   // 11: light orange
-  "#fbbf24",   // 12: yellow
-  "#4ade80",   // 13: light green
-  "#38bdf8",   // 14: sky blue
-  "#a78bfa",   // 15: lavender
-];
-
-/** Decode one nibble-packed GOL row chunk into the flat cells store. */
-function applyChunk(
-  chunk: GolRowChunk,
-  setCells: (fn: (s: number[]) => void) => void,
-) {
-  const base = chunk.rowIdx * GOL_COLS;
-  const bytes = chunk.cells as Uint8Array;
-  setCells((s: number[]) => {
-    for (let x = 0; x < GOL_COLS; x++) {
-      // Low nibble for even x, high nibble for odd x — matches server setColor().
-      const byteIdx = x >> 1;
-      const byte = bytes[byteIdx] || 0;
-      s[base + x] = x % 2 === 0 ? (byte & 0x0F) : ((byte >> 4) & 0x0F);
-    }
-  });
-}
+// Pre-built class name strings — no allocation on lookup.
+const CELL_CLASSES: string[] = Array.from({ length: 16 }, (_, i) => `gol-cell gol-c${i}`);
 
 /** Compute cell size to fit the grid within the viewport with some padding. */
 function calcCellSize() {
@@ -89,9 +56,9 @@ export default function GameOfLife() {
   const [cellPx, setCellPx] = createSignal(calcCellSize());
 
   // Recalculate on resize
-  if (typeof window !== "undefined") {
-    window.addEventListener("resize", () => setCellPx(calcCellSize()));
-  }
+  const onResize = () => setCellPx(calcCellSize());
+  window.addEventListener("resize", onResize);
+  onCleanup(() => window.removeEventListener("resize", onResize));
 
   // ── Async subscription readiness (Solid 2.0 Loading pattern) ──────
   let resolveSubscription!: () => void;
@@ -107,16 +74,33 @@ export default function GameOfLife() {
   const isSyncing = () => isPending(() => gridReady());
 
   // ── Setup: subscribe to GOL tables ────────────────────────────────
+  // Pre-allocated decode buffer — reused every chunk.
+  const _decodeBuf = new Uint8Array(GOL_COLS);
+
   onSettled(() => {
-    // Row chunks: each update touches only the 50 cells in that row.
+    const handleChunk = (chunk: GolRowChunk) => {
+      const base = chunk.rowIdx * GOL_COLS;
+      const bytes = chunk.cells as Uint8Array;
+      for (let x = 0; x < GOL_COLS; x++) {
+        const byteIdx = x >> 1;
+        const byte = bytes[byteIdx] || 0;
+        _decodeBuf[x] = x % 2 === 0 ? (byte & 0x0F) : ((byte >> 4) & 0x0F);
+      }
+      setCells((s: number[]) => {
+        for (let x = 0; x < GOL_COLS; x++) {
+          const val = _decodeBuf[x];
+          if (s[base + x] !== val) s[base + x] = val;
+        }
+      });
+    };
+
     conn.db.golRowChunk.onInsert((_ctx: EventContext, row: GolRowChunk) =>
-      applyChunk(row, setCells),
+      handleChunk(row),
     );
     conn.db.golRowChunk.onUpdate((_ctx: EventContext, _old: GolRowChunk, row: GolRowChunk) =>
-      applyChunk(row, setCells),
+      handleChunk(row),
     );
 
-    // Meta: generation counter.
     conn.db.golMeta.onInsert((_ctx: EventContext, row: GolMeta) =>
       setGeneration(row.generation),
     );
@@ -278,34 +262,19 @@ export default function GameOfLife() {
         >
           <Show when={gridReady()}>
             <div
-              style={{
-                display: "grid",
-                "grid-template-columns": `repeat(${GOL_COLS}, ${cellPx()}px)`,
-                gap: "1px",
-                "background-color": "#1a1a2e",
-                padding: "1px",
-                "user-select": "none",
-                "touch-action": "manipulation",
-                "border-radius": "4px",
-              }}
+              class="gol-grid"
+              style={{ "--cell-px": `${cellPx()}px` }}
             >
               <For each={indices} keyed={false}>
                 {(idxAccessor) => {
                   const x = () => idxAccessor() % GOL_COLS;
                   const y = () => Math.floor(idxAccessor() / GOL_COLS);
-                  const cellVal = () => cells[idxAccessor()];
                   return (
                     <div
+                      class={CELL_CLASSES[cells[idxAccessor()]] || CELL_CLASSES[0]}
                       onPointerDown={(e: PointerEvent) => {
                         e.preventDefault();
                         tapCell(x(), y());
-                      }}
-                      style={{
-                        width: `${cellPx()}px`,
-                        height: `${cellPx()}px`,
-                        "background-color": LIFE_PALETTE[cellVal()] || DEAD_COLOR,
-                        cursor: "pointer",
-                        transition: "background-color 0.1s",
                       }}
                     />
                   );
