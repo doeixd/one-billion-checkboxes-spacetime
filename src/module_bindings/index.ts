@@ -34,6 +34,7 @@ import {
 } from "spacetimedb";
 
 // Import all reducer arg schemas
+import GolTapCellReducer from "./gol_tap_cell_reducer";
 import ImportBoxesReducer from "./import_boxes_reducer";
 import RegisterFingerprintReducer from "./register_fingerprint_reducer";
 import SeedReducer from "./seed_reducer";
@@ -44,6 +45,7 @@ import ToggleReducer from "./toggle_reducer";
 
 // Import all table schema definitions
 import CheckboxesRow from "./checkboxes_table";
+import GolGridRow from "./gol_grid_table";
 import StatsRow from "./stats_table";
 
 /** Type-only namespace exports for generated type groups. */
@@ -61,6 +63,17 @@ const tablesSchema = __schema({
       { name: 'checkboxes_idx_key', constraint: 'unique', columns: ['idx'] },
     ],
   }, CheckboxesRow),
+  golGrid: __table({
+    name: 'gol_grid',
+    indexes: [
+      { accessor: 'id', name: 'gol_grid_id_idx_btree', algorithm: 'btree', columns: [
+        'id',
+      ] },
+    ],
+    constraints: [
+      { name: 'gol_grid_id_key', constraint: 'unique', columns: ['id'] },
+    ],
+  }, GolGridRow),
   stats: __table({
     name: 'stats',
     indexes: [
@@ -76,6 +89,7 @@ const tablesSchema = __schema({
 
 /** The schema information for all reducers in this module. This is defined the same way as the reducers would have been defined in the server, except the body of the reducer is omitted in code generation. */
 const reducersSchema = __reducers(
+  __reducerSchema("gol_tap_cell", GolTapCellReducer),
   __reducerSchema("import_boxes", ImportBoxesReducer),
   __reducerSchema("register_fingerprint", RegisterFingerprintReducer),
   __reducerSchema("seed", SeedReducer),

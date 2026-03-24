@@ -21,6 +21,12 @@ const BOXES_PER_DOCUMENT = 4000;
 const NUM_DOCUMENTS = Math.floor(NUM_BOXES / BOXES_PER_DOCUMENT); // 250,000
 const BYTES_PER_DOCUMENT = BOXES_PER_DOCUMENT / 2; // 2000 (4 bits per box, 2 nibbles per byte)
 
+// --- Game of Life constants ---
+const GOL_COLS = 50;
+const GOL_ROWS = 50;
+const GOL_CELL_COUNT = GOL_COLS * GOL_ROWS; // 2500
+const GOL_TICK_INTERVAL_US = 500_000n; // 500ms in microseconds
+
 // --- Nibble manipulation helpers ---
 
 /** Returns a zero-filled byte array representing 4,000 unchecked/uncolored boxes. */
@@ -79,6 +85,15 @@ const SyncStatsJob = table({
   scheduledAt: t.scheduleAt(),
 });
 
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+const GolTickJob = table({
+  name: 'gol_tick_job',
+  scheduled: (): any => run_gol_tick,
+}, {
+  scheduledId: t.u64().primaryKey().autoInc(),
+  scheduledAt: t.scheduleAt(),
+});
+
 const spacetimedb = schema({
   checkboxes: table(
     { name: 'checkboxes', public: true },
@@ -118,6 +133,15 @@ const spacetimedb = schema({
     }
   ),
   syncStatsJob: SyncStatsJob,
+  golGrid: table(
+    { name: 'gol_grid', public: true },
+    {
+      id: t.u32().primaryKey(),
+      cells: t.byteArray(),
+      generation: t.u64(),
+    }
+  ),
+  golTickJob: GolTickJob,
 });
 export default spacetimedb;
 
@@ -288,6 +312,160 @@ export const sync_stats = spacetimedb.reducer((ctx) => {
   recalcStats(ctx);
 });
 
+// --- Game of Life helpers ---
+
+/**
+ * Simple 32-bit xorshift PRNG. Mutates state in-place via the returned object.
+ * Deterministic for a given seed, but varying the seed (e.g. from timestamp)
+ * produces nondeterministic payload evolution across ticks — same board state
+ * at different times yields different inheritance outcomes.
+ */
+function createRng(seed: number) {
+  let s = (seed | 0) || 1; // must be non-zero
+  return {
+    /** Returns a non-negative 32-bit integer. */
+    next(): number {
+      s ^= s << 13;
+      s ^= s >>> 17;
+      s ^= s << 5;
+      return s >>> 0;
+    },
+  };
+}
+
+/**
+ * Pure next-generation function for Conway's Game of Life with rich payloads.
+ *
+ * Cell values: 0 = dead, 1-15 = alive with color/lineage payload.
+ * Conway rules (classic): survive on 2-3 neighbors, birth on exactly 3, death otherwise.
+ * Non-wrapping edges: neighbors outside the grid are ignored (boundary-safe).
+ *
+ * Non-classic extension — payload inheritance:
+ *   On birth, the new cell inherits the payload of one living neighbor chosen
+ *   via a seeded PRNG. Surviving cells keep their current payload. This means:
+ *     - stable structures preserve local identity
+ *     - births inherit from the surrounding population
+ *     - mixed populations diffuse visually across the board
+ *     - repeated runs from the same structural state may differ in payload
+ *       distribution while life/death structure remains identical
+ *
+ * @param cells  Current grid (length GOL_CELL_COUNT, values 0-15)
+ * @param seed   PRNG seed — vary per tick (e.g. from ctx.timestamp) for nondeterminism,
+ *               or fix for deterministic tests
+ */
+function golNextGeneration(cells: ArrayLike<number>, seed: number): Uint8Array {
+  const next = new Uint8Array(GOL_CELL_COUNT);
+  const rng = createRng(seed);
+  // Fixed buffer for neighbor payloads — avoids 2500 array allocations per tick
+  const nbuf = new Uint8Array(8);
+
+  for (let y = 0; y < GOL_ROWS; y++) {
+    for (let x = 0; x < GOL_COLS; x++) {
+      // Collect living neighbor payloads (boundary-safe, no wrapping)
+      let ncount = 0;
+      for (let dy = -1; dy <= 1; dy++) {
+        for (let dx = -1; dx <= 1; dx++) {
+          if (dx === 0 && dy === 0) continue;
+          const nx = x + dx;
+          const ny = y + dy;
+          if (nx < 0 || nx >= GOL_COLS || ny < 0 || ny >= GOL_ROWS) continue;
+          const val = cells[ny * GOL_COLS + nx];
+          if (val) nbuf[ncount++] = val;
+        }
+      }
+
+      const idx = y * GOL_COLS + x;
+      const currentVal = cells[idx];
+
+      if (currentVal !== 0 && (ncount === 2 || ncount === 3)) {
+        // Survival: preserve current payload
+        next[idx] = currentVal;
+      } else if (currentVal === 0 && ncount === 3) {
+        // Birth: inherit payload from a random living neighbor
+        next[idx] = nbuf[rng.next() % ncount];
+      }
+      // else: death — stays 0
+    }
+  }
+  return next;
+}
+
+/** Ensure the GOL grid row exists, creating it if needed. Returns the row. */
+function ensureGolGrid(ctx: any): any {
+  let grid = ctx.db.golGrid.id.find(0);
+  if (!grid) {
+    ctx.db.golGrid.insert({ id: 0, cells: new Uint8Array(GOL_CELL_COUNT), generation: 0n });
+    grid = ctx.db.golGrid.id.find(0)!;
+  }
+  return grid;
+}
+
+// --- Game of Life reducers ---
+
+/**
+ * Derive a stable color (1-15) from a player's identity.
+ * Different users get different colors; same user always gets the same color.
+ */
+function colorFromIdentity(identity: any): number {
+  const hex = identity.toHexString() as string;
+  let hash = 0;
+  for (let i = 0; i < hex.length; i++) {
+    hash = ((hash << 5) - hash + hex.charCodeAt(i)) | 0;
+  }
+  return ((hash >>> 0) % 15) + 1; // 1-15
+}
+
+/**
+ * Tap a cell: stamp a cross-shaped seed pattern (+) centered on (x, y).
+ * The color is derived from the caller's identity — multiplayer users
+ * get distinct colors automatically. Boundary-safe: arms that would
+ * extend off the grid are clipped rather than wrapping.
+ */
+export const gol_tap_cell = spacetimedb.reducer(
+  { x: t.u32(), y: t.u32() },
+  (ctx, { x, y }) => {
+    checkRateLimit(ctx);
+    if (x >= GOL_COLS || y >= GOL_ROWS) throw new SenderError('Out of bounds');
+    const grid = ensureGolGrid(ctx);
+    const cells = new Uint8Array(grid.cells);
+    const color = colorFromIdentity(ctx.sender);
+
+    // Center + four arms (boundary-safe: skip out-of-bounds)
+    const points: [number, number][] = [
+      [x, y],
+      [x, y - 1],
+      [x, y + 1],
+      [x - 1, y],
+      [x + 1, y],
+    ];
+    for (const [px, py] of points) {
+      if (px >= 0 && px < GOL_COLS && py >= 0 && py < GOL_ROWS) {
+        cells[py * GOL_COLS + px] = color;
+      }
+    }
+
+    ctx.db.golGrid.id.update({ ...grid, cells });
+  }
+);
+
+/** Scheduled reducer: advance one GOL generation and always reschedule. */
+export const run_gol_tick = spacetimedb.reducer(
+  { arg: GolTickJob.rowType },
+  (ctx, { arg: _arg }) => {
+    const grid = ensureGolGrid(ctx);
+
+    const seed = Number(ctx.timestamp.microsSinceUnixEpoch & 0xFFFFFFFFn);
+    const next = golNextGeneration(grid.cells, seed);
+    ctx.db.golGrid.id.update({ ...grid, cells: next, generation: grid.generation + 1n });
+
+    // Always reschedule — simulation never stops
+    ctx.db.golTickJob.insert({
+      scheduledId: 0n,
+      scheduledAt: ScheduleAt.time(ctx.timestamp.microsSinceUnixEpoch + GOL_TICK_INTERVAL_US),
+    });
+  }
+);
+
 // --- Lifecycle ---
 
 export const init = spacetimedb.init((ctx) => {
@@ -300,8 +478,31 @@ export const init = spacetimedb.init((ctx) => {
     scheduledId: 0n,
     scheduledAt: ScheduleAt.time(syncTime),
   });
+
+  // Ensure GOL grid exists and start the always-on tick loop
+  ensureGolGrid(ctx);
+  ctx.db.golTickJob.insert({
+    scheduledId: 0n,
+    scheduledAt: ScheduleAt.time(ctx.timestamp.microsSinceUnixEpoch + GOL_TICK_INTERVAL_US),
+  });
 });
 
-export const onConnect = spacetimedb.clientConnected((_ctx) => {});
+export const onConnect = spacetimedb.clientConnected((ctx) => {
+  // Ensure the GOL tick loop is running — init only fires on first creation,
+  // so after a republish the tick chain may be dead. Only schedule if no
+  // pending tick jobs exist (prevents parallel tick chains from stacking up).
+  ensureGolGrid(ctx);
+  let hasTickJob = false;
+  for (const _ of ctx.db.golTickJob.iter()) {
+    hasTickJob = true;
+    break;
+  }
+  if (!hasTickJob) {
+    ctx.db.golTickJob.insert({
+      scheduledId: 0n,
+      scheduledAt: ScheduleAt.time(ctx.timestamp.microsSinceUnixEpoch + GOL_TICK_INTERVAL_US),
+    });
+  }
+});
 
 export const onDisconnect = spacetimedb.clientDisconnected((_ctx) => {});

@@ -25,7 +25,7 @@ import {
   Show,
   Loading,
 } from "solid-js";
-import { conn, isConnected } from "./main.tsx";
+import { conn, isConnected, navigate } from "./main.tsx";
 import type { EventContext } from "./module_bindings/index.ts";
 import type { SubscriptionHandle } from "./module_bindings/index.ts";
 import type { Checkboxes, Stats } from "./module_bindings/types.ts";
@@ -565,6 +565,14 @@ export default function App() {
             "text-align": "right",
           }}
         >
+          <a
+            href="/life"
+            onClick={(e: MouseEvent) => { e.preventDefault(); navigate('/life'); }}
+            style={{ "text-decoration": "none", color: "#6b7280", "font-weight": "600" }}
+          >
+            Game of Life
+          </a>
+          {" · "}
           <a
             style={{ "text-decoration": "none", color: "#6b7280" }}
             href="https://spacetimedb.com/?referral=gillkyle"

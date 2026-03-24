@@ -6,12 +6,13 @@
  * `isConnected` is a module-level SolidJS signal so any component can read it
  * reactively without needing a context provider.
  */
-import { createSignal } from 'solid-js';
+import { createSignal, Show } from 'solid-js';
 import { render } from '@solidjs/web';
 import { inject } from '@vercel/analytics';
 import { injectSpeedInsights } from '@vercel/speed-insights';
 import FingerprintJS from '@fingerprintjs/fingerprintjs';
 import App from './App.tsx';
+import GameOfLife from './GameOfLife.tsx';
 import { DbConnection } from './module_bindings/index.ts';
 import type { ErrorContext } from './module_bindings/index.ts';
 import { Identity } from 'spacetimedb';
@@ -25,6 +26,15 @@ const TOKEN_KEY = `${HOST}/${DB_NAME}/auth_token`;
 
 // Module-level reactive signal — updated by connection callbacks, read by App
 export const [isConnected, setIsConnected] = createSignal(false);
+
+// Simple path-based routing (no router dependency needed)
+export const [currentPath, setCurrentPath] = createSignal(window.location.pathname);
+window.addEventListener('popstate', () => setCurrentPath(window.location.pathname));
+
+export function navigate(to: string) {
+  window.history.pushState({}, '', to);
+  setCurrentPath(to);
+}
 
 const onConnect = (conn: DbConnection, _identity: Identity, token: string) => {
   localStorage.setItem(TOKEN_KEY, token);
@@ -54,4 +64,8 @@ export const conn = DbConnection.builder()
   .onConnectError(onConnectError)
   .build();
 
-render(() => <App />, document.getElementById('root')!);
+render(() => (
+  <Show when={currentPath() === '/life'} fallback={<App />}>
+    <GameOfLife />
+  </Show>
+), document.getElementById('root')!);
