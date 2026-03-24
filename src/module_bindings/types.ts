@@ -22,6 +22,13 @@ export const PoisonJob = __t.object("PoisonJob", {
 });
 export type PoisonJob = __Infer<typeof PoisonJob>;
 
+export const RateLimit = __t.object("RateLimit", {
+  identity: __t.identity(),
+  lastToggleAt: __t.u64(),
+  toggleCount: __t.u32(),
+});
+export type RateLimit = __Infer<typeof RateLimit>;
+
 export const Stats = __t.object("Stats", {
   id: __t.u32(),
   totalColored: __t.u64(),

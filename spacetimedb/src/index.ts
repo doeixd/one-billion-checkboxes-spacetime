@@ -119,6 +119,14 @@ const spacetimedb = schema({
       totalColored: t.u64(),
     }
   ),
+  rateLimit: table(
+    { name: 'rate_limit' },
+    {
+      identity: t.identity().primaryKey(),
+      lastToggleAt: t.u64(), // microseconds since epoch
+      toggleCount: t.u32(),  // toggles in current window
+    }
+  ),
   poisonJob: PoisonJob,
   syncStatsJob: SyncStatsJob,
 });
@@ -136,6 +144,42 @@ function incrementStats(ctx: any, delta: 1 | -1) {
     ctx.db.stats.id.update({ ...row, totalColored: next });
   } else {
     ctx.db.stats.insert({ id: 0, totalColored: delta === 1 ? 1n : 0n });
+  }
+}
+
+const RATE_LIMIT_WINDOW_US = 1_000_000n; // 1 second in microseconds
+const RATE_LIMIT_MAX_TOGGLES = 20;      // max toggles per window
+
+/** Check and enforce rate limit. Throws if client is too fast. */
+function checkRateLimit(ctx: any) {
+  const now = ctx.timestamp.microsSinceUnixEpoch;
+  const existing = ctx.db.rateLimit.identity.find(ctx.sender);
+
+  if (existing) {
+    const elapsed = now - existing.lastToggleAt;
+    if (elapsed < RATE_LIMIT_WINDOW_US) {
+      // Still in the same window
+      if (existing.toggleCount >= RATE_LIMIT_MAX_TOGGLES) {
+        throw new Error('Rate limit exceeded — slow down');
+      }
+      ctx.db.rateLimit.identity.update({
+        ...existing,
+        toggleCount: existing.toggleCount + 1,
+      });
+    } else {
+      // New window — reset counter
+      ctx.db.rateLimit.identity.update({
+        ...existing,
+        lastToggleAt: now,
+        toggleCount: 1,
+      });
+    }
+  } else {
+    ctx.db.rateLimit.insert({
+      identity: ctx.sender,
+      lastToggleAt: now,
+      toggleCount: 1,
+    });
   }
 }
 
@@ -166,6 +210,8 @@ function recalcStats(ctx: any) {
 export const toggle = spacetimedb.reducer(
   { documentIdx: t.u32(), arrayIdx: t.u32(), color: t.u32() },
   (ctx, { documentIdx, arrayIdx, color }) => {
+    checkRateLimit(ctx);
+
     if (documentIdx >= NUM_DOCUMENTS || arrayIdx >= BOXES_PER_DOCUMENT) {
       throw new Error('Index out of range');
     }
