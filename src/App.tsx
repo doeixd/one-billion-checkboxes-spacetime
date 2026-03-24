@@ -71,6 +71,7 @@ export default function App() {
 
   const [totalColored, setTotalColored] = createSignal(0n);
   const [pendingCountDelta, setPendingCountDelta] = createSignal(0);
+  const [statsReady, setStatsReady] = createSignal(false);
 
   // ── Async subscription + grid readiness ──────────────────────────────
   let resolveSubscription!: () => void;
@@ -195,7 +196,9 @@ export default function App() {
     conn.db.stats.onUpdate((_ctx: EventContext, _old: Stats, row: Stats) => upsertStats(row));
 
     // Permanent subscription to stats (tiny — single row)
-    conn.subscriptionBuilder().subscribe("SELECT * FROM stats");
+    conn.subscriptionBuilder()
+      .onApplied(() => setStatsReady(true))
+      .subscribe("SELECT * FROM stats");
   });
 
   // ── Derived scroll values ─────────────────────────────────────────────
@@ -480,7 +483,7 @@ export default function App() {
               "margin-top": "2px",
             }}
           >
-            {isSyncing()
+            {!statsReady()
               ? "Connecting…"
               : `${(Number(totalColored()) + pendingCountDelta()).toLocaleString()} colored`}
           </div>
