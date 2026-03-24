@@ -444,34 +444,33 @@ export default function App() {
                 }}
               />
             </Show>
-            {/* Toggle round-trip indicator */}
-            <Show when={!isSyncing() && (pendingToggleCount() > 0 || lastRoundTripMs() !== null)}>
-              <span style={{
-                display: 'inline-flex',
-                'align-items': 'center',
-                gap: '4px',
-                'font-size': '0.7rem',
-                color: pendingToggleCount() > 0 ? '#9ca3af' : '#16a34a',
-                'font-variant-numeric': 'tabular-nums',
-                transition: 'color 0.2s ease-out',
-              }}>
-                <Show when={pendingToggleCount() > 0} fallback={
-                  <span style={{ color: '#16a34a' }}>{lastRoundTripMs()}ms</span>
-                }>
-                  <span
-                    style={{
-                      display: 'inline-block',
-                      width: '8px',
-                      height: '8px',
-                      border: '1.5px solid #e5e7eb',
-                      'border-top-color': '#9ca3af',
-                      'border-radius': '50%',
-                      animation: 'spin 0.6s linear infinite',
-                    }}
-                  />
+            {/* Toggle round-trip indicator — fixed width to prevent layout shift */}
+            <span style={{
+              display: 'inline-flex',
+              'align-items': 'center',
+              'justify-content': 'center',
+              'min-width': '38px',
+              'font-size': '0.7rem',
+              'font-variant-numeric': 'tabular-nums',
+              opacity: !isSyncing() && (pendingToggleCount() > 0 || lastRoundTripMs() !== null) ? '1' : '0',
+              transition: 'opacity 0.2s ease-out',
+            }}>
+              <Show when={pendingToggleCount() > 0} fallback={
+                <span style={{ color: '#16a34a' }}>{lastRoundTripMs()}ms</span>
+              }>
+                <span
+                  style={{
+                    display: 'inline-block',
+                    width: '8px',
+                    height: '8px',
+                    border: '1.5px solid #e5e7eb',
+                    'border-top-color': '#9ca3af',
+                    'border-radius': '50%',
+                    animation: 'spin 0.6s linear infinite',
+                  }}
+                />
                 </Show>
-              </span>
-            </Show>
+            </span>
           </div>
           <div style={{ color: '#6b7280', 'font-size': '0.8rem', 'margin-top': '2px' }}>
             {isSyncing()
