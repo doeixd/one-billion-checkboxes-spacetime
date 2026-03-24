@@ -5,6 +5,14 @@
  * server action that stamps a cross-shaped (+) seed pattern in the
  * player's identity-derived color. The simulation evolves from there.
  * All clients see the same board state — no local simulation.
+ *
+ * Data model (post-optimisation):
+ *   gol_row_chunk  — 50 rows × 25 bytes nibble-packed; SpacetimeDB only
+ *                    broadcasts rows that actually changed each tick.
+ *   gol_meta       — single row; generation counter updated every tick.
+ *
+ * Client rendering uses granular Solid.js store updates: only the cells
+ * belonging to a changed row chunk are touched, keeping DOM work minimal.
  */
 import {
   createSignal,
@@ -19,7 +27,7 @@ import {
 } from "solid-js";
 import { conn, isConnected } from "./main.tsx";
 import type { EventContext } from "./module_bindings/index.ts";
-import type { GolGrid } from "./module_bindings/types.ts";
+import type { GolRowChunk, GolMeta } from "./module_bindings/types.ts";
 
 const GOL_COLS = 50;
 const GOL_ROWS = 50;
@@ -50,6 +58,23 @@ const LIFE_PALETTE: string[] = [
   "#a78bfa",   // 15: lavender
 ];
 
+/** Decode one nibble-packed GOL row chunk into the flat cells store. */
+function applyChunk(
+  chunk: GolRowChunk,
+  setCells: (fn: (s: number[]) => void) => void,
+) {
+  const base = chunk.rowIdx * GOL_COLS;
+  const bytes = chunk.cells as Uint8Array;
+  setCells((s: number[]) => {
+    for (let x = 0; x < GOL_COLS; x++) {
+      // Low nibble for even x, high nibble for odd x — matches server setColor().
+      const byteIdx = x >> 1;
+      const byte = bytes[byteIdx] || 0;
+      s[base + x] = x % 2 === 0 ? (byte & 0x0F) : ((byte >> 4) & 0x0F);
+    }
+  });
+}
+
 export default function GameOfLife() {
   const [cells, setCells] = createStore<number[]>(new Array(CELL_COUNT).fill(0));
   const [generation, setGeneration] = createSignal(0n);
@@ -67,27 +92,33 @@ export default function GameOfLife() {
 
   const isSyncing = () => isPending(() => gridReady());
 
-  // ── Setup: subscribe to GOL grid ──────────────────────────────────
+  // ── Setup: subscribe to GOL tables ────────────────────────────────
   onSettled(() => {
-    const upsert = (row: GolGrid) => {
-      const bytes = row.cells as Uint8Array;
-      setCells((s: number[]) => {
-        for (let i = 0; i < CELL_COUNT; i++) {
-          s[i] = bytes[i] || 0;
-        }
-      });
-      setGeneration(row.generation);
-    };
+    // Row chunks: each update touches only the 50 cells in that row.
+    conn.db.golRowChunk.onInsert((_ctx: EventContext, row: GolRowChunk) =>
+      applyChunk(row, setCells),
+    );
+    conn.db.golRowChunk.onUpdate((_ctx: EventContext, _old: GolRowChunk, row: GolRowChunk) =>
+      applyChunk(row, setCells),
+    );
 
-    conn.db.golGrid.onInsert((_ctx: EventContext, row: GolGrid) => upsert(row));
-    conn.db.golGrid.onUpdate((_ctx: EventContext, _old: GolGrid, row: GolGrid) => upsert(row));
+    // Meta: generation counter.
+    conn.db.golMeta.onInsert((_ctx: EventContext, row: GolMeta) =>
+      setGeneration(row.generation),
+    );
+    conn.db.golMeta.onUpdate((_ctx: EventContext, _old: GolMeta, row: GolMeta) =>
+      setGeneration(row.generation),
+    );
 
     conn.subscriptionBuilder()
       .onApplied(() => resolveSubscription())
-      .subscribe("SELECT * FROM gol_grid");
+      .subscribe([
+        "SELECT * FROM gol_row_chunk",
+        "SELECT * FROM gol_meta",
+      ]);
   });
 
-  // ── Side effects (split createEffect: compute → apply) ───────────
+  // ── Side effects ──────────────────────────────────────────────────
   createEffect(
     () => generation(),
     (gen) => {
