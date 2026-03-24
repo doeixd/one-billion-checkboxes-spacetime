@@ -205,13 +205,48 @@ export const run_poison = spacetimedb.reducer(
   }
 );
 
+/** Recalculate totalColored by scanning all checkboxes rows. */
+export const sync_stats = spacetimedb.reducer((ctx) => {
+  let total = 0;
+  for (const row of ctx.db.checkboxes.iter()) {
+    for (let i = 0; i < row.boxes.length; i++) {
+      const byte = row.boxes[i];
+      if (byte === 0) continue;
+      if (byte & 0x0F) total++;
+      if (byte >> 4) total++;
+    }
+  }
+  const existing = ctx.db.stats.id.find(0);
+  if (existing) {
+    ctx.db.stats.id.update({ ...existing, totalColored: BigInt(total) });
+  } else {
+    ctx.db.stats.insert({ id: 0, totalColored: BigInt(total) });
+  }
+});
+
 // --- Lifecycle ---
 
 /**
- * Runs once on first publish — document rows are created lazily on first use,
- * so we only need to schedule the first poison job here.
+ * Runs once on first publish — schedule poison job and sync stats counter.
  */
 export const init = spacetimedb.init((ctx) => {
+  // Sync stats from existing data
+  let total = 0;
+  for (const row of ctx.db.checkboxes.iter()) {
+    for (let i = 0; i < row.boxes.length; i++) {
+      const byte = row.boxes[i];
+      if (byte === 0) continue;
+      if (byte & 0x0F) total++;
+      if (byte >> 4) total++;
+    }
+  }
+  const existing = ctx.db.stats.id.find(0);
+  if (existing) {
+    ctx.db.stats.id.update({ ...existing, totalColored: BigInt(total) });
+  } else {
+    ctx.db.stats.insert({ id: 0, totalColored: BigInt(total) });
+  }
+
   const futureTime = ctx.timestamp.microsSinceUnixEpoch + 10_000_000n;
   ctx.db.poisonJob.insert({
     scheduledId: 0n,
