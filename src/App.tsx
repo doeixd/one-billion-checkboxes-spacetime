@@ -105,6 +105,12 @@ export default function App() {
   );
   let roundTripFadeTimer = 0;
 
+  // ── Client-side rate limiting (matches server: 20 toggles/sec) ───────
+  const RATE_LIMIT_WINDOW = 1000; // ms
+  const RATE_LIMIT_MAX = 20;
+  let rateLimitStart = 0;
+  let rateLimitCount = 0;
+
   // ── UI state ──────────────────────────────────────────────────────────
   const [selectedColor, setSelectedColor] = createSignal(1);
 
@@ -341,6 +347,14 @@ export default function App() {
 
   const toggle = (documentIdx: number, arrayIdx: number) => {
     if (loading()) return;
+
+    // Client-side rate limit — drop excess clicks before they hit the server
+    const now = performance.now();
+    if (now - rateLimitStart > RATE_LIMIT_WINDOW) {
+      rateLimitStart = now;
+      rateLimitCount = 0;
+    }
+    if (++rateLimitCount > RATE_LIMIT_MAX) return;
 
     const currentColor = getCellColor(documentIdx, arrayIdx);
     const newColor =

@@ -20,14 +20,12 @@ const TOKEN_KEY = `${HOST}/${DB_NAME}/auth_token`;
 // Module-level reactive signal — updated by connection callbacks, read by App
 export const [isConnected, setIsConnected] = createSignal(false);
 
-const onConnect = (_conn: DbConnection, identity: Identity, token: string) => {
+const onConnect = (_conn: DbConnection, _identity: Identity, token: string) => {
   localStorage.setItem(TOKEN_KEY, token);
-  console.log('Connected to SpacetimeDB:', identity.toHexString());
   setIsConnected(true);
 };
 
 const onDisconnect = () => {
-  console.log('Disconnected from SpacetimeDB');
   setIsConnected(false);
 };
 
