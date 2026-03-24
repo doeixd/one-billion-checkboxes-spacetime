@@ -240,7 +240,7 @@ export default function App() {
     if (cols <= 0) return null;
 
     const visibleRows = poolRows();
-    const bufferRows = visibleRows * 3; // 3x viewport buffer
+    const bufferRows = visibleRows * 2; // 2x viewport buffer
     const firstRow = Math.max(0, startRow() - bufferRows);
     const lastRow = Math.min(numRows() - 1, startRow() + visibleRows + bufferRows);
 
@@ -392,7 +392,11 @@ export default function App() {
     });
     setPendingToggleCount((c) => c + 1);
 
-    conn.reducers.toggle({ documentIdx, arrayIdx, color: newColor });
+    conn.reducers.toggle({ documentIdx, arrayIdx, color: newColor }).catch(() => {
+      setRateLimited(true);
+      clearTimeout(rateLimitFadeTimer);
+      rateLimitFadeTimer = window.setTimeout(() => setRateLimited(false), 2000);
+    });
   };
 
   // ─────────────────────────────────────────────────────────────────────────

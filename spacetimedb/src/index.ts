@@ -11,7 +11,7 @@
  *   A scheduled "poison" reducer runs every 10 seconds to randomly toggle 10
  *   checkboxes, keeping the board alive even when no users are interacting.
  *
- *   A scheduled "sync_stats" job runs every 5 seconds to recalculate the global
+ *   A scheduled "sync_stats" job runs every 15 seconds to recalculate the global
  *   colored-checkbox count from ground truth (full scan of all document rows).
  */
 import { schema, table, t, SenderError } from 'spacetimedb/server';
@@ -150,18 +150,6 @@ export default spacetimedb;
 
 // --- Helpers ---
 
-/** Atomically increment or decrement totalColored by exactly 1. */
-function incrementStats(ctx: any, delta: 1 | -1) {
-  const row = ctx.db.stats.id.find(0);
-  if (row) {
-    const next = delta === 1
-      ? row.totalColored + 1n
-      : row.totalColored > 0n ? row.totalColored - 1n : 0n;
-    ctx.db.stats.id.update({ ...row, totalColored: next });
-  } else {
-    ctx.db.stats.insert({ id: 0, totalColored: delta === 1 ? 1n : 0n });
-  }
-}
 
 const RATE_LIMIT_WINDOW_US = 1_000_000n; // 1 second in microseconds
 const RATE_LIMIT_MAX_TOGGLES = 20;      // max toggles per window
@@ -268,15 +256,11 @@ export const toggle = spacetimedb.reducer(
       const oldColor = getColor(boxes, arrayIdx);
       if (setColor(boxes, arrayIdx, clampedColor)) {
         ctx.db.checkboxes.idx.update({ ...existing, boxes });
-        // Atomic ±1 stats update (only when colored state changes)
-        if (oldColor === 0 && clampedColor > 0) incrementStats(ctx, 1);
-        else if (oldColor > 0 && clampedColor === 0) incrementStats(ctx, -1);
       }
     } else if (clampedColor > 0) {
       const boxes = emptyBoxes();
       setColor(boxes, arrayIdx, clampedColor);
       ctx.db.checkboxes.insert({ idx: documentIdx, boxes });
-      incrementStats(ctx, 1);
     }
   }
 );
@@ -336,7 +320,7 @@ export const run_sync_stats = spacetimedb.reducer(
     recalcStats(ctx);
 
     // Reschedule in 5 seconds
-    const futureTime = ctx.timestamp.microsSinceUnixEpoch + 5_000_000n;
+    const futureTime = ctx.timestamp.microsSinceUnixEpoch + 15_000_000n;
     ctx.db.syncStatsJob.insert({
       scheduledId: 0n,
       scheduledAt: ScheduleAt.time(futureTime),
@@ -364,7 +348,7 @@ export const init = spacetimedb.init((ctx) => {
   });
 
   // Schedule stats sync job (5s interval)
-  const syncTime = ctx.timestamp.microsSinceUnixEpoch + 5_000_000n;
+  const syncTime = ctx.timestamp.microsSinceUnixEpoch + 15_000_000n;
   ctx.db.syncStatsJob.insert({
     scheduledId: 0n,
     scheduledAt: ScheduleAt.time(syncTime),
