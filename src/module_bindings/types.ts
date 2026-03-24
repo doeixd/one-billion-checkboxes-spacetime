@@ -22,3 +22,9 @@ export const PoisonJob = __t.object("PoisonJob", {
 });
 export type PoisonJob = __Infer<typeof PoisonJob>;
 
+export const Stats = __t.object("Stats", {
+  id: __t.u32(),
+  totalColored: __t.u64(),
+});
+export type Stats = __Infer<typeof Stats>;
+

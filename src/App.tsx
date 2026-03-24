@@ -27,7 +27,7 @@ import {
 import { conn, isConnected } from "./main.tsx";
 import type { EventContext } from "./module_bindings/index.ts";
 import type { SubscriptionHandle } from "./module_bindings/index.ts";
-import type { Checkboxes } from "./module_bindings/types.ts";
+import type { Checkboxes, Stats } from "./module_bindings/types.ts";
 
 // ─── Constants ────────────────────────────────────────────────────────────────
 
@@ -62,17 +62,6 @@ function getColor(boxes: number[], arrayIdx: number): number {
   return arrayIdx % 2 === 0 ? byte & 0x0f : (byte >> 4) & 0x0f;
 }
 
-function countColored(boxes: number[]): number {
-  let count = 0;
-  for (let i = 0; i < boxes.length; i++) {
-    const byte = boxes[i];
-    if (byte === 0) continue;
-    if (byte & 0x0f) count++;
-    if (byte >> 4) count++;
-  }
-  return count;
-}
-
 // ─── Component ────────────────────────────────────────────────────────────────
 
 export default function App() {
@@ -81,8 +70,7 @@ export default function App() {
     equals: false,
   });
 
-  const [numCheckedBoxes, setNumCheckedBoxes] = createSignal(0);
-  const docColorCounts = new Map<number, number>();
+  const [totalColored, setTotalColored] = createSignal(0n);
 
   // ── Async subscription + grid readiness ──────────────────────────────
   let resolveSubscription!: () => void;
@@ -151,18 +139,13 @@ export default function App() {
       }
     });
 
-    // SpacetimeDB event handlers
+    // SpacetimeDB event handlers — checkboxes
     const upsertRow = (row: Checkboxes) => {
       const boxes = Array.from(row.boxes);
       setBoxesMap((map) => {
         map.set(row.idx, boxes);
         return map;
       });
-
-      const newCount = countColored(boxes);
-      const oldCount = docColorCounts.get(row.idx) ?? 0;
-      docColorCounts.set(row.idx, newCount);
-      setNumCheckedBoxes((prev) => prev + newCount - oldCount);
 
       setPendingUpdates((prev) => {
         if (!prev.has(row.idx)) return prev;
@@ -198,9 +181,6 @@ export default function App() {
         map.delete(row.idx);
         return map;
       });
-      const oldCount = docColorCounts.get(row.idx) ?? 0;
-      docColorCounts.delete(row.idx);
-      setNumCheckedBoxes((prev) => prev - oldCount);
 
       // Clean up pending/inflight state for unsubscribed docs
       setPendingUpdates((prev) => {
@@ -215,6 +195,14 @@ export default function App() {
         setPendingToggleCount((c) => Math.max(0, c - inflight.count));
       }
     });
+
+    // SpacetimeDB event handlers — stats (global colored count)
+    const upsertStats = (row: Stats) => setTotalColored(row.totalColored);
+    conn.db.stats.onInsert((_ctx: EventContext, row: Stats) => upsertStats(row));
+    conn.db.stats.onUpdate((_ctx: EventContext, _old: Stats, row: Stats) => upsertStats(row));
+
+    // Permanent subscription to stats (tiny — single row)
+    conn.subscriptionBuilder().subscribe("SELECT * FROM stats");
   });
 
   // ── Derived scroll values ─────────────────────────────────────────────
@@ -337,7 +325,7 @@ export default function App() {
   // ── Side effects ──────────────────────────────────────────────────────
 
   createEffect(
-    () => numCheckedBoxes(),
+    () => Number(totalColored()),
     (count) => {
       document.title = `${count.toLocaleString()} colored — One Billion Checkboxes`;
     },
@@ -489,7 +477,7 @@ export default function App() {
           >
             {isSyncing()
               ? "Connecting…"
-              : `${numCheckedBoxes().toLocaleString()} colored`}
+              : `${Number(totalColored()).toLocaleString()} colored`}
           </div>
         </div>
 

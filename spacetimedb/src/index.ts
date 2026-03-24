@@ -91,9 +91,29 @@ const spacetimedb = schema({
       boxes: t.array(t.u8()),
     }
   ),
+  stats: table(
+    { name: 'stats', public: true },
+    {
+      id: t.u32().primaryKey(),
+      totalColored: t.u64(),
+    }
+  ),
   poisonJob: PoisonJob,
 });
 export default spacetimedb;
+
+// --- Helpers ---
+
+/** Adjust the global colored-checkbox counter by `delta` (can be negative). */
+function adjustStats(ctx: any, delta: number) {
+  const row = ctx.db.stats.id.find(0);
+  if (row) {
+    const prev = Number(row.totalColored);
+    ctx.db.stats.id.update({ ...row, totalColored: BigInt(Math.max(0, prev + delta)) });
+  } else {
+    ctx.db.stats.insert({ id: 0, totalColored: BigInt(Math.max(0, delta)) });
+  }
+}
 
 // --- Reducers ---
 
@@ -113,14 +133,19 @@ export const toggle = spacetimedb.reducer(
     const existing = ctx.db.checkboxes.idx.find(documentIdx);
     if (existing) {
       const boxes = [...existing.boxes];
+      const oldColor = getColor(boxes, arrayIdx);
       if (setColor(boxes, arrayIdx, clampedColor)) {
         ctx.db.checkboxes.idx.update({ ...existing, boxes });
+        const wasColored = oldColor > 0 ? 1 : 0;
+        const isColored = clampedColor > 0 ? 1 : 0;
+        adjustStats(ctx, isColored - wasColored);
       }
     } else if (clampedColor > 0) {
       // Lazily create the document on first non-zero interaction
       const boxes = emptyBoxes();
       setColor(boxes, arrayIdx, clampedColor);
       ctx.db.checkboxes.insert({ idx: documentIdx, boxes });
+      adjustStats(ctx, 1);
     }
   }
 );
@@ -129,6 +154,11 @@ export const toggle = spacetimedb.reducer(
 export const seed = spacetimedb.reducer((ctx) => {
   for (const row of ctx.db.checkboxes.iter()) {
     ctx.db.checkboxes.idx.delete(row.idx);
+  }
+  // Reset stats
+  const stats = ctx.db.stats.id.find(0);
+  if (stats) {
+    ctx.db.stats.id.update({ ...stats, totalColored: 0n });
   }
 });
 
@@ -151,13 +181,18 @@ export const run_poison = spacetimedb.reducer(
       const row = ctx.db.checkboxes.idx.find(documentIdx);
       if (row) {
         const boxes = [...row.boxes];
+        const oldColor = getColor(boxes, arrayIdx);
         if (setColor(boxes, arrayIdx, color)) {
           ctx.db.checkboxes.idx.update({ ...row, boxes });
+          const wasColored = oldColor > 0 ? 1 : 0;
+          const isColored = color > 0 ? 1 : 0;
+          adjustStats(ctx, isColored - wasColored);
         }
       } else if (color > 0) {
         const boxes = emptyBoxes();
         setColor(boxes, arrayIdx, color);
         ctx.db.checkboxes.insert({ idx: documentIdx, boxes });
+        adjustStats(ctx, 1);
       }
     }
 
