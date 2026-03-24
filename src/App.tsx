@@ -18,6 +18,17 @@
  *   • <For> with keyed={false}            — replaces <Index> from 1.x
  *   • Optimistic updates via pendingUpdates signal — applied on top of the
  *       server-confirmed boxesMap; cleared when SpacetimeDB confirms each row.
+ *   • createMemo(async fn)               — SolidJS 2.0 native async memo; no
+ *       createAsync wrapper needed. Returning a Promise from createMemo marks the
+ *       computation as async. The reactivity system tracks its pending state so
+ *       isPending() and <Loading> work automatically.
+ *   • isPending(() => expr)              — returns true while any async memo
+ *       inside the thunk is still resolving. Read OUTSIDE a Loading/Suspense
+ *       boundary so this component itself does not suspend.
+ *   • <Loading fallback={…}>             — shows fallback only on initial load;
+ *       subsequent background refreshes keep the old UI visible and instead
+ *       make isPending() return true inside (unlike <Suspense> which tears
+ *       down content on every async transition).
  *
  * Virtual scrolling:
  *   Implemented without a library. A ResizeObserver tracks the container
@@ -30,10 +41,12 @@ import {
   createSignal,
   createMemo,
   createEffect,
+  isPending,
   onSettled,
   onCleanup,
   For,
   Show,
+  Loading,
 } from 'solid-js';
 import { conn, isConnected } from './main.tsx';
 import type { EventContext } from './module_bindings/index.ts';
@@ -96,7 +109,34 @@ function applyNibble(boxes: number[], arrayIdx: number, color: number): number[]
 export default function App() {
   // ── Table state ──────────────────────────────────────────────────────────
   const [checkboxRows, setCheckboxRows] = createSignal<Checkboxes[]>([]);
-  const [isTableLoaded, setIsTableLoaded] = createSignal(false);
+
+  // ── Async subscription readiness ──────────────────────────────────────────
+  //
+  // In SolidJS 2.0, createMemo can return a Promise — no createAsync needed.
+  // The reactivity system treats any memo that returns a Promise as "async":
+  //   • isPending(() => subscriptionReady()) → true while the Promise is pending
+  //   • Reading subscriptionReady() inside a <Loading> boundary causes it to
+  //     show the fallback until the Promise resolves
+  //
+  // We bridge SpacetimeDB's callback-based onApplied into a Promise using a
+  // simple resolver variable captured at construction time.
+  let resolveSubscription!: () => void;
+  const subscriptionPromise = new Promise<void>(res => { resolveSubscription = res; });
+
+  const subscriptionReady = createMemo(async () => {
+    await subscriptionPromise;
+    return true as const;
+  });
+
+  // ── Global pending indicator ──────────────────────────────────────────────
+  //
+  // isPending() takes a thunk; returns true when any async memo accessed
+  // inside that thunk is still resolving its Promise.
+  //
+  // Called HERE — outside any <Loading> boundary — so reading subscriptionReady()
+  // inside the thunk does NOT cause this component to suspend. It only observes
+  // the pending state without participating in it.
+  const isSyncing = () => isPending(() => subscriptionReady());
 
   /**
    * Pending optimistic nibble writes that haven't been confirmed by the server
@@ -165,9 +205,12 @@ export default function App() {
 
     // 2b. Subscribe — SpacetimeDB will replay all existing rows via onInsert,
     //     then fire onApplied to signal that the initial snapshot is complete.
+    //     Resolving subscriptionPromise here unblocks the async memo above,
+    //     which in turn makes isPending() return false and <Loading> render
+    //     the grid content instead of the connecting fallback.
     conn
       .subscriptionBuilder()
-      .onApplied(() => setIsTableLoaded(true))
+      .onApplied(() => resolveSubscription())
       .subscribe(['SELECT * FROM checkboxes']);
   });
 
@@ -277,7 +320,8 @@ export default function App() {
   };
 
   // ── Toggle handler ────────────────────────────────────────────────────────
-  const loading = () => !isConnected() || !isTableLoaded();
+  // subscriptionReady() returns true once resolved, undefined while pending.
+  const loading = () => !isConnected() || !subscriptionReady();
 
   const toggle = (documentIdx: number, arrayIdx: number) => {
     if (loading()) return;
@@ -342,11 +386,36 @@ export default function App() {
         }}
       >
         <div>
-          <div style={{ 'font-weight': '700', 'font-size': '1rem' }}>
-            One Billion Checkboxes
+          <div style={{ display: 'flex', 'align-items': 'center', gap: '6px' }}>
+            <span style={{ 'font-weight': '700', 'font-size': '1rem' }}>
+              One Billion Checkboxes
+            </span>
+            {/*
+              Global isPending indicator.
+              isPending() is read OUTSIDE <Loading> so the header never suspends —
+              it just observes whether the async subscriptionReady memo is still
+              in-flight and shows a spinner while it is.
+            */}
+            <Show when={isSyncing()}>
+              <span
+                aria-label="Connecting…"
+                style={{
+                  display: 'inline-block',
+                  width: '10px',
+                  height: '10px',
+                  border: '2px solid #e5e7eb',
+                  'border-top-color': '#6b7280',
+                  'border-radius': '50%',
+                  animation: 'spin 0.75s linear infinite',
+                  'flex-shrink': '0',
+                }}
+              />
+            </Show>
           </div>
           <div style={{ color: '#6b7280', 'font-size': '0.8rem', 'margin-top': '2px' }}>
-            {loading() ? 'Connecting…' : `${numCheckedBoxes().toLocaleString()} colored`}
+            {isSyncing()
+              ? 'Connecting…'
+              : `${numCheckedBoxes().toLocaleString()} colored`}
           </div>
         </div>
 
@@ -417,12 +486,50 @@ export default function App() {
         style={{ 'flex-grow': '1', overflow: 'hidden', position: 'relative' }}
       >
         {/*
-          Show the scroll area only after the ResizeObserver has fired once
-          and given us a real container width. This prevents a flash where
-          numColumns = 1 (because size.width = 0) that would trigger a 1B-row
-          layout before the real dimensions are known.
+          <Loading> — SolidJS 2.0 async boundary.
+          Behaviour differs from <Suspense>:
+            • <Suspense> tears down its children and shows the fallback on EVERY
+              async transition (initial load AND every subsequent refresh).
+            • <Loading> shows the fallback only on the INITIAL load. After that,
+              background refreshes keep the existing UI stable and instead make
+              isPending() return true inside (used above for the header spinner).
+          Here the "initial load" is the SpacetimeDB subscription becoming ready.
+          Once that Promise resolves, <Loading> renders the grid and never hides
+          it again — real-time WebSocket updates go through signals, not new
+          Suspense transitions, so they never re-trigger the fallback.
         */}
-        <Show when={size().width > 0}>
+        <Loading fallback={
+          <div style={{
+            display: 'flex',
+            'flex-direction': 'column',
+            'align-items': 'center',
+            'justify-content': 'center',
+            height: '100%',
+            gap: '10px',
+            color: '#9ca3af',
+            'font-family': 'system-ui, sans-serif',
+          }}>
+            <span style={{
+              display: 'inline-block',
+              width: '28px',
+              height: '28px',
+              border: '3px solid #e5e7eb',
+              'border-top-color': '#6b7280',
+              'border-radius': '50%',
+              animation: 'spin 0.75s linear infinite',
+            }} />
+            <span style={{ 'font-size': '0.875rem' }}>Connecting to SpacetimeDB…</span>
+          </div>
+        }>
+          {/*
+            subscriptionReady() is read here — inside the <Loading> boundary.
+            While its underlying Promise is pending, SolidJS suspends this
+            subtree and <Loading> renders the fallback above instead.
+            Once the Promise resolves, the grid renders and stays rendered.
+            The size().width > 0 guard prevents a 1B-row flash before the
+            ResizeObserver fires.
+          */}
+          <Show when={subscriptionReady() && size().width > 0}>
           <div
             ref={scrollRef}
             style={{ width: '100%', height: '100%', overflow: 'auto' }}
@@ -509,7 +616,8 @@ export default function App() {
               </For>
             </div>
           </div>
-        </Show>
+          </Show>
+        </Loading>
       </div>
     </div>
   );
