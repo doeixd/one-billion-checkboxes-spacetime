@@ -129,9 +129,12 @@ export default spacetimedb;
 /** Recalculate totalColored by scanning all checkboxes rows. */
 function recalcStats(ctx: any) {
   let total = 0;
+  let docCount = 0;
   for (const row of ctx.db.checkboxes.iter()) {
     total += countColored(row.boxes);
+    docCount++;
   }
+  console.log(`sync_stats: ${docCount} documents, ${total} colored checkboxes`);
   const existing = ctx.db.stats.id.find(0);
   if (existing) {
     ctx.db.stats.id.update({ ...existing, totalColored: BigInt(total) });
@@ -222,8 +225,8 @@ export const run_sync_stats = spacetimedb.reducer(
   (ctx, { arg: _arg }) => {
     recalcStats(ctx);
 
-    // Reschedule in 30 seconds
-    const futureTime = ctx.timestamp.microsSinceUnixEpoch + 30_000_000n;
+    // Reschedule in 5 seconds
+    const futureTime = ctx.timestamp.microsSinceUnixEpoch + 5_000_000n;
     ctx.db.syncStatsJob.insert({
       scheduledId: 0n,
       scheduledAt: ScheduleAt.time(futureTime),
@@ -249,8 +252,8 @@ export const init = spacetimedb.init((ctx) => {
     scheduledAt: ScheduleAt.time(poisonTime),
   });
 
-  // Schedule stats sync job (30s interval)
-  const syncTime = ctx.timestamp.microsSinceUnixEpoch + 30_000_000n;
+  // Schedule stats sync job (5s interval)
+  const syncTime = ctx.timestamp.microsSinceUnixEpoch + 5_000_000n;
   ctx.db.syncStatsJob.insert({
     scheduledId: 0n,
     scheduledAt: ScheduleAt.time(syncTime),
