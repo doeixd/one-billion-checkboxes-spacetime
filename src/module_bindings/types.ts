@@ -29,12 +29,6 @@ export const IdentityFingerprint = __t.object("IdentityFingerprint", {
 });
 export type IdentityFingerprint = __Infer<typeof IdentityFingerprint>;
 
-export const PoisonJob = __t.object("PoisonJob", {
-  scheduledId: __t.u64(),
-  scheduledAt: __t.scheduleAt(),
-});
-export type PoisonJob = __Infer<typeof PoisonJob>;
-
 export const RateLimit = __t.object("RateLimit", {
   identity: __t.identity(),
   lastToggleAt: __t.u64(),

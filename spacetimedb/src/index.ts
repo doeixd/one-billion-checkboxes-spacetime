@@ -2,9 +2,9 @@
  * SpacetimeDB server module — defines the database schema and all server-side logic.
  *
  * Architecture:
- *   1,000,000,000 checkboxes are stored lazily across up to 250,000 rows in the
- *   `checkboxes` table. Each row holds 4,000 checkboxes packed as nibbles (4 bits
- *   each) in a 2,000-byte array. Nibble value 0 = unchecked; 1-15 = color index.
+ *   1,000,000,000 checkboxes are stored lazily across up to 2,000,000 rows in the
+ *   `checkboxes` table. Each row holds 500 checkboxes packed as nibbles (4 bits
+ *   each) in a 250-byte array. Nibble value 0 = unchecked; 1-15 = color index.
  *   Document rows are created on first use (lazy initialization), so initial
  *   startup is instant regardless of the total checkbox count.
  *
@@ -17,13 +17,13 @@ import { ScheduleAt, Identity } from 'spacetimedb';
 // --- Constants ---
 const OWNER = Identity.fromString('c20036cec45c9902116128ccc5adaed19dd340abfd61c1be811d513710d75b54');
 const NUM_BOXES = 1_000_000_000;
-const BOXES_PER_DOCUMENT = 4000;
-const NUM_DOCUMENTS = Math.floor(NUM_BOXES / BOXES_PER_DOCUMENT); // 250,000
-const BYTES_PER_DOCUMENT = BOXES_PER_DOCUMENT / 2; // 2000 (4 bits per box, 2 nibbles per byte)
+const BOXES_PER_DOCUMENT = 500;
+const NUM_DOCUMENTS = Math.floor(NUM_BOXES / BOXES_PER_DOCUMENT); // 2,000,000
+const BYTES_PER_DOCUMENT = BOXES_PER_DOCUMENT / 2; // 250 (4 bits per box, 2 nibbles per byte)
 
 // --- Nibble manipulation helpers ---
 
-/** Returns a zero-filled byte array representing 4,000 unchecked/uncolored boxes. */
+/** Returns a zero-filled byte array representing 500 unchecked/uncolored boxes. */
 function emptyBoxes(): Uint8Array {
   return new Uint8Array(BYTES_PER_DOCUMENT);
 }

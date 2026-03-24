@@ -4,6 +4,16 @@
  *
  * Usage: npx tsx scripts/export-checkboxes.ts
  */
+// Polyfill for Node < 22
+if (typeof Promise.withResolvers === 'undefined') {
+  (Promise as any).withResolvers = function <T>() {
+    let resolve!: (value: T | PromiseLike<T>) => void;
+    let reject!: (reason?: any) => void;
+    const promise = new Promise<T>((res, rej) => { resolve = res; reject = rej; });
+    return { promise, resolve, reject };
+  };
+}
+
 import { DbConnection } from '../src/module_bindings/index.ts';
 import type { Checkboxes } from '../src/module_bindings/types.ts';
 import fs from 'fs';

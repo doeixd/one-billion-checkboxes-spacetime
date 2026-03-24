@@ -4,12 +4,27 @@
  *
  * Usage: npx tsx scripts/import-checkboxes.ts
  */
+// Polyfill for Node < 22
+if (typeof Promise.withResolvers === 'undefined') {
+  (Promise as any).withResolvers = function <T>() {
+    let resolve!: (value: T | PromiseLike<T>) => void;
+    let reject!: (reason?: any) => void;
+    const promise = new Promise<T>((res, rej) => { resolve = res; reject = rej; });
+    return { promise, resolve, reject };
+  };
+}
+
 import { DbConnection } from '../src/module_bindings/index.ts';
 import fs from 'fs';
 
 const HOST = process.env.SPACETIMEDB_HOST ?? 'wss://maincloud.spacetimedb.com';
 const DB_NAME = process.env.SPACETIMEDB_DB_NAME ?? 'deni-x4u44';
 const IN_FILE = process.env.IN_FILE ?? 'scripts/checkboxes-export.json';
+const TOKEN = process.env.SPACETIMEDB_TOKEN;
+if (!TOKEN) {
+  console.error('Set SPACETIMEDB_TOKEN to the owner identity auth token (from browser localStorage).');
+  process.exit(1);
+}
 
 // New layout constants (must match server after Phase 2)
 const NEW_BOXES_PER_DOC = 500;
@@ -54,6 +69,7 @@ const BATCH_SIZE = 50; // documents per reducer call
 const conn = DbConnection.builder()
   .withUri(HOST)
   .withDatabaseName(DB_NAME)
+  .withToken(TOKEN)
   .withConfirmedReads(false)
   .onConnect(async () => {
     console.log('Connected. Importing...');
