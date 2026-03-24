@@ -29,7 +29,14 @@ const PRUNE_INTERVAL_US = 5_000_000n;   // run prune job every 5 seconds
 const GOL_COLS = 50;
 const GOL_ROWS = 50;
 const GOL_CELL_COUNT = GOL_COLS * GOL_ROWS; // 2500
-const GOL_TICK_INTERVAL_US = 500_000n; // 500ms in microseconds
+const GOL_CHUNK_BYTES = GOL_COLS / 2;       // 25 bytes per row (nibble-packed)
+const GOL_TICK_INTERVAL_US = 500_000n;      // 500ms — normal (board is active)
+const GOL_TICK_INTERVAL_IDLE_US = 2_000_000n; // 2s — board is stable, slow down
+
+// --- Game of Life pre-allocated buffers (reused every tick; no per-tick allocation) ---
+const _golCurrentBuf = new Uint8Array(GOL_CELL_COUNT);
+const _golNextBuf    = new Uint8Array(GOL_CELL_COUNT);
+const _golNbuf       = new Uint8Array(8);
 
 // --- Nibble manipulation helpers ---
 
@@ -107,6 +114,27 @@ const GolTickJob = table({
   scheduledAt: t.scheduleAt(),
 });
 
+// GOL grid: one row per GOL row (50 rows × 25 bytes nibble-packed).
+// SpacetimeDB only broadcasts rows that actually change each tick — on a typical
+// sparse/stable board that is far fewer than the full 50 rows, giving proportional
+// bandwidth savings over a single monolithic row.
+const GolRowChunk = table(
+  { name: 'gol_row_chunk', public: true },
+  {
+    rowIdx: t.u32().primaryKey(), // 0–49: which GOL row
+    cells:  t.byteArray(),        // 25 bytes, nibble-packed (50 cells × 4 bits)
+  }
+);
+
+// Single-row metadata: generation counter, updated every tick.
+const GolMeta = table(
+  { name: 'gol_meta', public: true },
+  {
+    id:         t.u32().primaryKey(),
+    generation: t.u64(),
+  }
+);
+
 const spacetimedb = schema({
   checkboxes: table(
     { name: 'checkboxes', public: true },
@@ -163,14 +191,8 @@ const spacetimedb = schema({
   ),
   syncStatsJob: SyncStatsJob,
   pruneChangesJob: PruneChangesJob,
-  golGrid: table(
-    { name: 'gol_grid', public: true },
-    {
-      id: t.u32().primaryKey(),
-      cells: t.byteArray(),
-      generation: t.u64(),
-    }
-  ),
+  golRowChunk: GolRowChunk,
+  golMeta: GolMeta,
   golTickJob: GolTickJob,
 });
 export default spacetimedb;
@@ -417,15 +439,16 @@ function createRng(seed: number) {
  *     - repeated runs from the same structural state may differ in payload
  *       distribution while life/death structure remains identical
  *
- * @param cells  Current grid (length GOL_CELL_COUNT, values 0-15)
- * @param seed   PRNG seed — vary per tick (e.g. from ctx.timestamp) for nondeterminism,
- *               or fix for deterministic tests
+ * Performance: writes into the module-level _golNextBuf (no allocation per tick).
+ * The returned reference points at _golNextBuf — caller must use it before the
+ * next invocation. Safe in SpacetimeDB's single-threaded reducer model.
+ *
+ * @param cells  Current grid (length GOL_CELL_COUNT, values 0-15) — use _golCurrentBuf
+ * @param seed   PRNG seed — vary per tick (e.g. from ctx.timestamp) for nondeterminism
  */
-function golNextGeneration(cells: ArrayLike<number>, seed: number): Uint8Array {
-  const next = new Uint8Array(GOL_CELL_COUNT);
+function golNextGeneration(cells: Uint8Array, seed: number): Uint8Array {
+  _golNextBuf.fill(0);
   const rng = createRng(seed);
-  // Fixed buffer for neighbor payloads — avoids 2500 array allocations per tick
-  const nbuf = new Uint8Array(8);
 
   for (let y = 0; y < GOL_ROWS; y++) {
     for (let x = 0; x < GOL_COLS; x++) {
@@ -438,7 +461,7 @@ function golNextGeneration(cells: ArrayLike<number>, seed: number): Uint8Array {
           const ny = y + dy;
           if (nx < 0 || nx >= GOL_COLS || ny < 0 || ny >= GOL_ROWS) continue;
           const val = cells[ny * GOL_COLS + nx];
-          if (val) nbuf[ncount++] = val;
+          if (val) _golNbuf[ncount++] = val;
         }
       }
 
@@ -447,25 +470,27 @@ function golNextGeneration(cells: ArrayLike<number>, seed: number): Uint8Array {
 
       if (currentVal !== 0 && (ncount === 2 || ncount === 3)) {
         // Survival: preserve current payload
-        next[idx] = currentVal;
+        _golNextBuf[idx] = currentVal;
       } else if (currentVal === 0 && ncount === 3) {
         // Birth: inherit payload from a random living neighbor
-        next[idx] = nbuf[rng.next() % ncount];
+        _golNextBuf[idx] = _golNbuf[rng.next() % ncount];
       }
       // else: death — stays 0
     }
   }
-  return next;
+  return _golNextBuf;
 }
 
-/** Ensure the GOL grid row exists, creating it if needed. Returns the row. */
-function ensureGolGrid(ctx: any): any {
-  let grid = ctx.db.golGrid.id.find(0);
-  if (!grid) {
-    ctx.db.golGrid.insert({ id: 0, cells: new Uint8Array(GOL_CELL_COUNT), generation: 0n });
-    grid = ctx.db.golGrid.id.find(0)!;
+/**
+ * Ensure GOL grid is initialised.  Uses golMeta existence as a sentinel —
+ * if meta row 0 exists, all 50 row-chunks are assumed to exist too.
+ */
+function ensureGolGrid(ctx: any): void {
+  if (ctx.db.golMeta.id.find(0)) return; // already initialised
+  ctx.db.golMeta.insert({ id: 0, generation: 0n });
+  for (let rowIdx = 0; rowIdx < GOL_ROWS; rowIdx++) {
+    ctx.db.golRowChunk.insert({ rowIdx, cells: new Uint8Array(GOL_CHUNK_BYTES) });
   }
-  return grid;
 }
 
 // --- Game of Life reducers ---
@@ -488,48 +513,108 @@ function colorFromIdentity(identity: any): number {
  * The color is derived from the caller's identity — multiplayer users
  * get distinct colors automatically. Boundary-safe: arms that would
  * extend off the grid are clipped rather than wrapping.
+ *
+ * Updates only the affected row chunks (1–3 rows for a cross pattern).
  */
 export const gol_tap_cell = spacetimedb.reducer(
   { x: t.u32(), y: t.u32() },
   (ctx, { x, y }) => {
     checkRateLimit(ctx);
     if (x >= GOL_COLS || y >= GOL_ROWS) throw new SenderError('Out of bounds');
-    const grid = ensureGolGrid(ctx);
-    const cells = new Uint8Array(grid.cells);
+    ensureGolGrid(ctx);
     const color = colorFromIdentity(ctx.sender);
 
-    // Center + four arms (boundary-safe: skip out-of-bounds)
+    // Center + four arms (boundary-safe: skip out-of-bounds).
+    // Group by row so we read/write each chunk at most once.
     const points: [number, number][] = [
-      [x, y],
-      [x, y - 1],
-      [x, y + 1],
-      [x - 1, y],
-      [x + 1, y],
+      [x, y], [x, y - 1], [x, y + 1], [x - 1, y], [x + 1, y],
     ];
+    const byRow = new Map<number, number[]>(); // rowIdx → [colIdx, ...]
     for (const [px, py] of points) {
       if (px >= 0 && px < GOL_COLS && py >= 0 && py < GOL_ROWS) {
-        cells[py * GOL_COLS + px] = color;
+        let cols = byRow.get(py);
+        if (!cols) { cols = []; byRow.set(py, cols); }
+        cols.push(px);
       }
     }
-
-    ctx.db.golGrid.id.update({ ...grid, cells });
+    for (const [rowIdx, cols] of byRow) {
+      const existing = ctx.db.golRowChunk.rowIdx.find(rowIdx);
+      const cells = existing ? new Uint8Array(existing.cells) : new Uint8Array(GOL_CHUNK_BYTES);
+      for (const col of cols) setColor(cells, col, color);
+      if (existing) {
+        ctx.db.golRowChunk.rowIdx.update({ rowIdx, cells });
+      } else {
+        ctx.db.golRowChunk.insert({ rowIdx, cells });
+      }
+    }
   }
 );
 
-/** Scheduled reducer: advance one GOL generation and always reschedule. */
+/**
+ * Scheduled reducer: advance one GOL generation and always reschedule.
+ *
+ * Optimisations applied here:
+ *   1. Reads current state into the pre-allocated _golCurrentBuf (no per-tick alloc).
+ *   2. Computes next gen into _golNextBuf (no per-tick alloc).
+ *   3. Only writes row-chunks that actually changed — SpacetimeDB broadcasts only
+ *      those rows, so sparse/stable boards send far less data per tick.
+ *   4. Adaptive tick rate: 500 ms while the board is active, 2 s when it's stable,
+ *      cutting both CPU time and bandwidth on quiescent boards.
+ */
 export const run_gol_tick = spacetimedb.reducer(
   { arg: GolTickJob.rowType },
   (ctx, { arg: _arg }) => {
-    const grid = ensureGolGrid(ctx);
+    ensureGolGrid(ctx);
 
+    // 1. Read current flat state from row chunks into pre-allocated buffer.
+    _golCurrentBuf.fill(0);
+    for (const chunk of ctx.db.golRowChunk.iter()) {
+      const base = chunk.rowIdx * GOL_COLS;
+      for (let x = 0; x < GOL_COLS; x++) {
+        _golCurrentBuf[base + x] = getColor(chunk.cells, x);
+      }
+    }
+
+    // 2. Compute next generation (writes into _golNextBuf).
     const seed = Number(ctx.timestamp.microsSinceUnixEpoch & 0xFFFFFFFFn);
-    const next = golNextGeneration(grid.cells, seed);
-    ctx.db.golGrid.id.update({ ...grid, cells: next, generation: grid.generation + 1n });
+    golNextGeneration(_golCurrentBuf, seed);
 
-    // Always reschedule — simulation never stops
+    // 3. Write back only changed row chunks (nibble-packed).
+    let anyChanged = false;
+    for (let rowIdx = 0; rowIdx < GOL_ROWS; rowIdx++) {
+      const base = rowIdx * GOL_COLS;
+
+      // Fast row-level diff: skip write if this row is identical.
+      let rowChanged = false;
+      for (let x = 0; x < GOL_COLS; x++) {
+        if (_golNextBuf[base + x] !== _golCurrentBuf[base + x]) {
+          rowChanged = true;
+          break;
+        }
+      }
+      if (!rowChanged) continue;
+
+      anyChanged = true;
+      const newCells = new Uint8Array(GOL_CHUNK_BYTES);
+      for (let x = 0; x < GOL_COLS; x++) setColor(newCells, x, _golNextBuf[base + x]);
+
+      const existing = ctx.db.golRowChunk.rowIdx.find(rowIdx);
+      if (existing) {
+        ctx.db.golRowChunk.rowIdx.update({ rowIdx, cells: newCells });
+      } else {
+        ctx.db.golRowChunk.insert({ rowIdx, cells: newCells });
+      }
+    }
+
+    // 4. Update generation counter.
+    const meta = ctx.db.golMeta.id.find(0)!;
+    ctx.db.golMeta.id.update({ ...meta, generation: meta.generation + 1n });
+
+    // 5. Adaptive reschedule: slow down when the board is stable.
+    const interval = anyChanged ? GOL_TICK_INTERVAL_US : GOL_TICK_INTERVAL_IDLE_US;
     ctx.db.golTickJob.insert({
       scheduledId: 0n,
-      scheduledAt: ScheduleAt.time(ctx.timestamp.microsSinceUnixEpoch + GOL_TICK_INTERVAL_US),
+      scheduledAt: ScheduleAt.time(ctx.timestamp.microsSinceUnixEpoch + interval),
     });
   }
 );
@@ -562,9 +647,10 @@ export const init = spacetimedb.init((ctx) => {
 });
 
 export const onConnect = spacetimedb.clientConnected((ctx) => {
-  // Ensure the GOL tick loop is running — init only fires on first creation,
-  // so after a republish the tick chain may be dead. Only schedule if no
-  // pending tick jobs exist (prevents parallel tick chains from stacking up).
+  // Ensure GOL grid is initialised and the tick loop is running.
+  // init only fires on first database creation; after a republish the tick
+  // chain may be dead.  Only schedule if no pending tick jobs exist (prevents
+  // parallel tick chains from stacking up).
   ensureGolGrid(ctx);
   let hasTickJob = false;
   for (const _ of ctx.db.golTickJob.iter()) {
