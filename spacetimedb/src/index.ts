@@ -2,9 +2,11 @@
  * SpacetimeDB server module — defines the database schema and all server-side logic.
  *
  * Architecture:
- *   1,000,000 checkboxes are stored across 250 rows in the `checkboxes` table.
- *   Each row holds 4,000 checkboxes packed into a 500-byte array (1 bit per checkbox).
- *   This keeps total storage at ~125 KB and means a single toggle only updates one row.
+ *   1,000,000,000 checkboxes are stored lazily across up to 250,000 rows in the
+ *   `checkboxes` table. Each row holds 4,000 checkboxes packed as nibbles (4 bits
+ *   each) in a 2,000-byte array. Nibble value 0 = unchecked; 1-15 = color index.
+ *   Document rows are created on first use (lazy initialization), so initial
+ *   startup is instant regardless of the total checkbox count.
  *
  *   A scheduled "poison" reducer runs every 10 seconds to randomly toggle 10
  *   checkboxes, keeping the board alive even when no users are interacting.
@@ -13,35 +15,40 @@ import { schema, table, t } from 'spacetimedb/server';
 import { ScheduleAt } from 'spacetimedb';
 
 // --- Constants ---
-const NUM_BOXES = 1_000_000;
+const NUM_BOXES = 1_000_000_000;
 const BOXES_PER_DOCUMENT = 4000;
-const NUM_DOCUMENTS = Math.floor(NUM_BOXES / BOXES_PER_DOCUMENT); // 250
-const BYTES_PER_DOCUMENT = BOXES_PER_DOCUMENT / 8; // 500
+const NUM_DOCUMENTS = Math.floor(NUM_BOXES / BOXES_PER_DOCUMENT); // 250,000
+const BYTES_PER_DOCUMENT = BOXES_PER_DOCUMENT / 2; // 2000 (4 bits per box, 2 nibbles per byte)
 
-// --- Bit manipulation helpers ---
+// --- Nibble manipulation helpers ---
 
-/** Returns a zero-filled byte array representing 4,000 unchecked boxes. */
+/** Returns a zero-filled byte array representing 4,000 unchecked/uncolored boxes. */
 function emptyBoxes(): number[] {
   return new Array(BYTES_PER_DOCUMENT).fill(0);
 }
 
-/** Reads bit `arrayIdx` from a byte array. */
-function isBitChecked(boxes: number[], arrayIdx: number): boolean {
-  const bit = arrayIdx % 8;
-  const byteIdx = Math.floor(arrayIdx / 8);
-  return !!((1 << bit) & (boxes[byteIdx] || 0));
+/**
+ * Reads the 4-bit nibble color value for checkbox `arrayIdx` from the byte array.
+ * Returns 0 (unchecked) through 15 (color index).
+ */
+function getColor(boxes: number[], arrayIdx: number): number {
+  const byteIdx = Math.floor(arrayIdx / 2);
+  const byte = boxes[byteIdx] || 0;
+  return arrayIdx % 2 === 0 ? (byte & 0x0F) : ((byte >> 4) & 0x0F);
 }
 
 /**
- * Sets or clears bit `arrayIdx` in the byte array (mutates in place).
- * Returns true if the bit actually changed — this avoids unnecessary
- * database writes when the checkbox is already in the desired state.
+ * Sets the 4-bit nibble for checkbox `arrayIdx` to `color` (0-15).
+ * Mutates in place. Returns true if the value actually changed.
  */
-function setBit(boxes: number[], arrayIdx: number, checked: boolean): boolean {
-  if (isBitChecked(boxes, arrayIdx) === checked) return false;
-  const bit = arrayIdx % 8;
-  const byteIdx = Math.floor(arrayIdx / 8);
-  boxes[byteIdx] = (1 << bit) ^ boxes[byteIdx];
+function setColor(boxes: number[], arrayIdx: number, color: number): boolean {
+  const current = getColor(boxes, arrayIdx);
+  if (current === color) return false;
+  const byteIdx = Math.floor(arrayIdx / 2);
+  const byte = boxes[byteIdx] || 0;
+  boxes[byteIdx] = arrayIdx % 2 === 0
+    ? (byte & 0xF0) | (color & 0x0F)
+    : (byte & 0x0F) | ((color & 0x0F) << 4);
   return true;
 }
 
@@ -60,9 +67,6 @@ function pseudoRandom(seed: number, i: number): number {
 
 /**
  * Scheduled table for the "poison the well" recurring job.
- * SpacetimeDB auto-deletes each row after its reducer fires, so the
- * reducer re-inserts a new row to keep the cycle going.
- *
  * The `(): any` return type annotation breaks a circular TypeScript
  * inference chain between PoisonJob ↔ run_poison ↔ spacetimedb schema.
  */
@@ -76,11 +80,8 @@ const PoisonJob = table({
 });
 
 /**
- * Schema: defines all tables and exports the `spacetimedb` handle used
- * to create reducers and lifecycle hooks below.
- *
- * `checkboxes` — 250 public rows, each with a u32 primary key (0-249) and
- * a byte array holding the bit-packed checkbox states.
+ * Schema: `checkboxes` — up to 250,000 public rows, each with a u32 primary key
+ * (0-249,999) and a 2,000-byte nibble-packed array holding 4,000 checkbox colors.
  */
 const spacetimedb = schema({
   checkboxes: table(
@@ -96,39 +97,45 @@ export default spacetimedb;
 
 // --- Reducers ---
 
-/** Toggle a single checkbox. Called from the client on click. */
+/**
+ * Set the color of a single checkbox. Called from the client on click.
+ * color: 0 = uncheck, 1-15 = color index.
+ * Creates the document row lazily on first use.
+ */
 export const toggle = spacetimedb.reducer(
-  { documentIdx: t.u32(), arrayIdx: t.u32(), checked: t.bool() },
-  (ctx, { documentIdx, arrayIdx, checked }) => {
+  { documentIdx: t.u32(), arrayIdx: t.u32(), color: t.u32() },
+  (ctx, { documentIdx, arrayIdx, color }) => {
     if (documentIdx >= NUM_DOCUMENTS || arrayIdx >= BOXES_PER_DOCUMENT) {
       throw new Error('Index out of range');
     }
-    const row = ctx.db.checkboxes.idx.find(documentIdx);
-    if (!row) return;
+    const clampedColor = Math.min(color, 15);
 
-    // Copy the byte array so we can mutate it, then write back if changed
-    const boxes = [...row.boxes];
-    if (setBit(boxes, arrayIdx, checked)) {
-      ctx.db.checkboxes.idx.update({ ...row, boxes });
+    const existing = ctx.db.checkboxes.idx.find(documentIdx);
+    if (existing) {
+      const boxes = [...existing.boxes];
+      if (setColor(boxes, arrayIdx, clampedColor)) {
+        ctx.db.checkboxes.idx.update({ ...existing, boxes });
+      }
+    } else if (clampedColor > 0) {
+      // Lazily create the document on first non-zero interaction
+      const boxes = emptyBoxes();
+      setColor(boxes, arrayIdx, clampedColor);
+      ctx.db.checkboxes.insert({ idx: documentIdx, boxes });
     }
   }
 );
 
-/** Reset all checkboxes to unchecked. Can be called manually to wipe the board. */
+/** Reset all checkboxes to unchecked by deleting all document rows. */
 export const seed = spacetimedb.reducer((ctx) => {
   for (const row of ctx.db.checkboxes.iter()) {
     ctx.db.checkboxes.idx.delete(row.idx);
   }
-  const empty = emptyBoxes();
-  for (let i = 0; i < NUM_DOCUMENTS; i++) {
-    ctx.db.checkboxes.insert({ idx: i, boxes: [...empty] });
-  }
 });
 
 /**
- * "Poison the well" — scheduled reducer that toggles 10 random checkboxes
- * then re-schedules itself 10 seconds later. Uses ctx.timestamp as a PRNG
- * seed since SpacetimeDB reducers must be fully deterministic.
+ * "Poison the well" — scheduled reducer that randomly colors/uncolors 10 checkboxes
+ * then re-schedules itself 10 seconds later. Uses ctx.timestamp as a PRNG seed
+ * since SpacetimeDB reducers must be fully deterministic.
  */
 export const run_poison = spacetimedb.reducer(
   { arg: PoisonJob.rowType },
@@ -139,14 +146,18 @@ export const run_poison = spacetimedb.reducer(
       const val = pseudoRandom(prngSeed, i);
       const documentIdx = val % NUM_DOCUMENTS;
       const arrayIdx = (val >>> 8) % BOXES_PER_DOCUMENT;
+      const color = (val >>> 16) % 16; // 0 = uncheck, 1-15 = random color
 
       const row = ctx.db.checkboxes.idx.find(documentIdx);
       if (row) {
         const boxes = [...row.boxes];
-        const currentlyChecked = isBitChecked(boxes, arrayIdx);
-        if (setBit(boxes, arrayIdx, !currentlyChecked)) {
+        if (setColor(boxes, arrayIdx, color)) {
           ctx.db.checkboxes.idx.update({ ...row, boxes });
         }
+      } else if (color > 0) {
+        const boxes = emptyBoxes();
+        setColor(boxes, arrayIdx, color);
+        ctx.db.checkboxes.insert({ idx: documentIdx, boxes });
       }
     }
 
@@ -161,14 +172,11 @@ export const run_poison = spacetimedb.reducer(
 
 // --- Lifecycle ---
 
-/** Runs once on first publish — seeds 250 empty documents and starts the poison loop. */
+/**
+ * Runs once on first publish — document rows are created lazily on first use,
+ * so we only need to schedule the first poison job here.
+ */
 export const init = spacetimedb.init((ctx) => {
-  const empty = emptyBoxes();
-  for (let i = 0; i < NUM_DOCUMENTS; i++) {
-    ctx.db.checkboxes.insert({ idx: i, boxes: [...empty] });
-  }
-
-  // Schedule the first poison job (10 seconds from now)
   const futureTime = ctx.timestamp.microsSinceUnixEpoch + 10_000_000n;
   ctx.db.poisonJob.insert({
     scheduledId: 0n,
