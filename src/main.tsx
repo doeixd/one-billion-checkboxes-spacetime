@@ -8,11 +8,16 @@
  */
 import { createSignal } from 'solid-js';
 import { render } from '@solidjs/web';
+import { inject } from '@vercel/analytics';
+import { injectSpeedInsights } from '@vercel/speed-insights';
 import FingerprintJS from '@fingerprintjs/fingerprintjs';
 import App from './App.tsx';
 import { DbConnection } from './module_bindings/index.ts';
 import type { ErrorContext } from './module_bindings/index.ts';
 import { Identity } from 'spacetimedb';
+
+inject();
+injectSpeedInsights();
 
 const HOST = import.meta.env.VITE_SPACETIMEDB_HOST ?? 'ws://localhost:3000';
 const DB_NAME = import.meta.env.VITE_SPACETIMEDB_DB_NAME ?? 'deni-x4u44';

@@ -14,6 +14,8 @@
   "dependencies": {
     "@fingerprintjs/fingerprintjs": "^5.1.0",
     "@solidjs/web": "^2.0.0-experimental.16",
+    "@vercel/analytics": "^2.0.1",
+    "@vercel/speed-insights": "^2.0.0",
     "solid-js": "^2.0.0-beta.0",
     "spacetimedb": "=2.0.2"
   },
