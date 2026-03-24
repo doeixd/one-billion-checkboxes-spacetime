@@ -144,12 +144,17 @@ export default function App() {
       if (e) {
         setSize({ width: e.contentRect.width, height: e.contentRect.height });
         if (!containerMeasured()) setContainerMeasured(true);
-        // Re-measure scrollbar on resize
         measureScrollbar();
       }
     });
     obs.observe(containerRef);
-    onCleanup(() => obs.disconnect());
+
+    // 2.0 cleanup: return from onSettled cleans up on unmount
+    onCleanup(() => {
+      obs.disconnect();
+      cancelAnimationFrame(rafId);
+      clearTimeout(roundTripFadeTimer);
+    });
 
     // SpacetimeDB event handlers
     const upsertRow = (row: Checkboxes) => {
