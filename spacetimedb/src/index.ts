@@ -41,6 +41,8 @@ const _golNextBuf    = new Uint8Array(GOL_CELL_COUNT);
 const _golNbuf       = new Uint8Array(8);
 // Diff buffer: worst case 2500 cells change × 3 bytes each = 7500 bytes.
 const _golDiffBuf    = new Uint8Array(GOL_CELL_COUNT * 3);
+// Whether _golCurrentBuf has been populated from DB (needed after republish).
+let _golBufferHydrated = false;
 
 // --- Nibble manipulation helpers ---
 
@@ -566,7 +568,11 @@ export const gol_tap_cell = spacetimedb.reducer(
     for (const [rowIdx, cols] of byRow) {
       const existing = ctx.db.golRowChunk.rowIdx.find(rowIdx);
       const cells = existing ? new Uint8Array(existing.cells) : new Uint8Array(GOL_CHUNK_BYTES);
-      for (const col of cols) setColor(cells, col, color);
+      for (const col of cols) {
+        setColor(cells, col, color);
+        // Keep in-memory buffer in sync so the next tick sees the tap.
+        _golCurrentBuf[rowIdx * GOL_COLS + col] = color;
+      }
       if (existing) {
         ctx.db.golRowChunk.rowIdx.update({ rowIdx, cells });
       } else {
@@ -592,13 +598,16 @@ export const run_gol_tick = spacetimedb.reducer(
   (ctx, { arg: _arg }) => {
     ensureGolGrid(ctx);
 
-    // 1. Read current flat state from row chunks into pre-allocated buffer.
-    _golCurrentBuf.fill(0);
-    for (const chunk of ctx.db.golRowChunk.iter()) {
-      const base = chunk.rowIdx * GOL_COLS;
-      for (let x = 0; x < GOL_COLS; x++) {
-        _golCurrentBuf[base + x] = getColor(chunk.cells, x);
+    // 1. Hydrate from DB on first tick after (re)publish; thereafter use in-memory state.
+    if (!_golBufferHydrated) {
+      _golCurrentBuf.fill(0);
+      for (const chunk of ctx.db.golRowChunk.iter()) {
+        const base = chunk.rowIdx * GOL_COLS;
+        for (let x = 0; x < GOL_COLS; x++) {
+          _golCurrentBuf[base + x] = getColor(chunk.cells, x);
+        }
       }
+      _golBufferHydrated = true;
     }
 
     // 2. Compute next generation (writes into _golNextBuf).
@@ -615,7 +624,10 @@ export const run_gol_tick = spacetimedb.reducer(
       }
     }
 
-    // 4. Write diff row (single broadcast per tick).
+    // 4. Advance in-memory state: current ← next for the next tick.
+    _golCurrentBuf.set(_golNextBuf);
+
+    // 5. Write diff row (single broadcast per tick).
     const diffRow = ctx.db.golDiff.id.find(0);
     const diffSlice = _golDiffBuf.slice(0, diffLen);
     if (diffRow) {
@@ -624,17 +636,17 @@ export const run_gol_tick = spacetimedb.reducer(
       ctx.db.golDiff.insert({ id: 0, data: diffSlice });
     }
 
-    // 5. Update generation counter.
+    // 6. Update generation counter.
     const meta = ctx.db.golMeta.id.find(0)!;
     const gen = meta.generation + 1n;
     ctx.db.golMeta.id.update({ ...meta, generation: gen });
 
-    // 6. Periodically sync row chunks for new-client snapshots.
+    // 7. Periodically sync row chunks for new-client snapshots.
     if (diffLen > 0 && Number(gen % BigInt(GOL_SNAPSHOT_INTERVAL)) === 0) {
       for (let rowIdx = 0; rowIdx < GOL_ROWS; rowIdx++) {
         const base = rowIdx * GOL_COLS;
         const newCells = new Uint8Array(GOL_CHUNK_BYTES);
-        for (let x = 0; x < GOL_COLS; x++) setColor(newCells, x, _golNextBuf[base + x]);
+        for (let x = 0; x < GOL_COLS; x++) setColor(newCells, x, _golCurrentBuf[base + x]);
         const existing = ctx.db.golRowChunk.rowIdx.find(rowIdx);
         if (existing) {
           ctx.db.golRowChunk.rowIdx.update({ rowIdx, cells: newCells });
@@ -644,7 +656,7 @@ export const run_gol_tick = spacetimedb.reducer(
       }
     }
 
-    // 7. Adaptive reschedule: slow down when the board is stable.
+    // 8. Adaptive reschedule: slow down when the board is stable.
     const interval = diffLen > 0 ? GOL_TICK_INTERVAL_US : GOL_TICK_INTERVAL_IDLE_US;
     ctx.db.golTickJob.insert({
       scheduledId: 0n,
