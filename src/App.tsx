@@ -25,10 +25,11 @@
  *   • isPending(() => expr)              — returns true while any async memo
  *       inside the thunk is still resolving. Read OUTSIDE a Loading/Suspense
  *       boundary so this component itself does not suspend.
- *   • <Loading fallback={…}>             — shows fallback only on initial load;
+ *   • <Loading on={memo} fallback={…}>   — shows fallback only on initial load;
  *       subsequent background refreshes keep the old UI visible and instead
- *       make isPending() return true inside (unlike <Suspense> which tears
- *       down content on every async transition).
+ *       make isPending() return true inside. <Suspense> is fully removed in
+ *       SolidJS 2.0; <Loading> is its replacement. The `on` prop explicitly
+ *       binds the async dependency to watch.
  *
  * Virtual scrolling:
  *   Implemented without a library. A ResizeObserver tracks the container
@@ -487,18 +488,23 @@ export default function App() {
       >
         {/*
           <Loading> — SolidJS 2.0 async boundary.
-          Behaviour differs from <Suspense>:
-            • <Suspense> tears down its children and shows the fallback on EVERY
-              async transition (initial load AND every subsequent refresh).
+          NOTE: <Suspense> is fully removed in 2.0; <Loading> replaces it.
+
+          Props used:
+            on={subscriptionReady}   — the memo accessor to watch. Loading tracks
+              this async dependency directly rather than relying on subscriptionReady()
+              being read somewhere inside the children tree.
+            fallback={…}             — rendered while the async memo is pending.
+
+          Behaviour vs the old <Suspense>:
+            • <Suspense> tore down children on EVERY async transition.
             • <Loading> shows the fallback only on the INITIAL load. After that,
               background refreshes keep the existing UI stable and instead make
-              isPending() return true inside (used above for the header spinner).
-          Here the "initial load" is the SpacetimeDB subscription becoming ready.
-          Once that Promise resolves, <Loading> renders the grid and never hides
-          it again — real-time WebSocket updates go through signals, not new
-          Suspense transitions, so they never re-trigger the fallback.
+              isPending() return true (used above for the header spinner).
+          Once subscriptionReady resolves, <Loading> renders the grid permanently —
+          real-time WebSocket updates flow through signals, not new async boundaries.
         */}
-        <Loading fallback={
+        <Loading on={subscriptionReady} fallback={
           <div style={{
             display: 'flex',
             'flex-direction': 'column',
