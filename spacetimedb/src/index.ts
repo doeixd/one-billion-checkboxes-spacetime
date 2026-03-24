@@ -106,14 +106,22 @@ const SyncStatsJob = table({
 
 const spacetimedb = schema({
   checkboxes: table(
-    { name: 'checkboxes', public: true },
+    {
+      name: 'checkboxes',
+      public: true,
+      indexes: [{ name: 'checkboxes_idx', algorithm: 'btree', columns: ['idx'] }],
+    },
     {
       idx: t.u32().primaryKey(),
       boxes: t.byteArray(),
     }
   ),
   stats: table(
-    { name: 'stats', public: true },
+    {
+      name: 'stats',
+      public: true,
+      indexes: [{ name: 'stats_id', algorithm: 'btree', columns: ['id'] }],
+    },
     {
       id: t.u32().primaryKey(),
       totalColored: t.u64(),
