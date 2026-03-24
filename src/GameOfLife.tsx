@@ -32,7 +32,6 @@ import type { GolRowChunk, GolMeta } from "./module_bindings/types.ts";
 const GOL_COLS = 50;
 const GOL_ROWS = 50;
 const CELL_COUNT = GOL_COLS * GOL_ROWS;
-const CELL_PX = 12;
 
 const indices = Array.from({ length: CELL_COUNT }, (_, i) => i);
 
@@ -75,9 +74,24 @@ function applyChunk(
   });
 }
 
+/** Compute cell size to fit the grid within the viewport with some padding. */
+function calcCellSize() {
+  const pad = 24; // padding on each side
+  const headerH = 50;
+  const maxW = (window.innerWidth - pad * 2) / (GOL_COLS + 1); // +1 for gaps
+  const maxH = (window.innerHeight - headerH - pad * 2) / (GOL_ROWS + 1);
+  return Math.max(4, Math.floor(Math.min(maxW, maxH)));
+}
+
 export default function GameOfLife() {
   const [cells, setCells] = createStore<number[]>(new Array(CELL_COUNT).fill(0));
   const [generation, setGeneration] = createSignal(0n);
+  const [cellPx, setCellPx] = createSignal(calcCellSize());
+
+  // Recalculate on resize
+  if (typeof window !== "undefined") {
+    window.addEventListener("resize", () => setCellPx(calcCellSize()));
+  }
 
   // ── Async subscription readiness (Solid 2.0 Loading pattern) ──────
   let resolveSubscription!: () => void;
@@ -266,11 +280,12 @@ export default function GameOfLife() {
             <div
               style={{
                 display: "grid",
-                "grid-template-columns": `repeat(${GOL_COLS}, ${CELL_PX}px)`,
+                "grid-template-columns": `repeat(${GOL_COLS}, ${cellPx()}px)`,
                 gap: "1px",
                 "background-color": "#1a1a2e",
                 padding: "1px",
                 "user-select": "none",
+                "touch-action": "manipulation",
                 "border-radius": "4px",
               }}
             >
@@ -286,8 +301,8 @@ export default function GameOfLife() {
                         tapCell(x(), y());
                       }}
                       style={{
-                        width: `${CELL_PX}px`,
-                        height: `${CELL_PX}px`,
+                        width: `${cellPx()}px`,
+                        height: `${cellPx()}px`,
                         "background-color": LIFE_PALETTE[cellVal()] || DEAD_COLOR,
                         cursor: "pointer",
                         transition: "background-color 0.1s",
