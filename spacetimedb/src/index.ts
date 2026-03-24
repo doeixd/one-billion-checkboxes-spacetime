@@ -10,6 +10,9 @@
  *
  *   A scheduled "poison" reducer runs every 10 seconds to randomly toggle 10
  *   checkboxes, keeping the board alive even when no users are interacting.
+ *
+ *   A scheduled "sync_stats" job runs every 30 seconds to recalculate the global
+ *   colored-checkbox count from ground truth (full scan of all document rows).
  */
 import { schema, table, t } from 'spacetimedb/server';
 import { ScheduleAt } from 'spacetimedb';
@@ -52,6 +55,18 @@ function setColor(boxes: number[], arrayIdx: number, color: number): boolean {
   return true;
 }
 
+/** Count all non-zero nibbles in a boxes byte array. */
+function countColored(boxes: ArrayLike<number>): number {
+  let count = 0;
+  for (let i = 0; i < boxes.length; i++) {
+    const byte = boxes[i];
+    if (byte === 0) continue;
+    if (byte & 0x0F) count++;
+    if (byte >> 4) count++;
+  }
+  return count;
+}
+
 /**
  * Deterministic PRNG (reducers can't use Math.random).
  * Uses a multiplicative hash to derive a pseudo-random u32 from (seed, i).
@@ -67,8 +82,6 @@ function pseudoRandom(seed: number, i: number): number {
 
 /**
  * Scheduled table for the "poison the well" recurring job.
- * The `(): any` return type annotation breaks a circular TypeScript
- * inference chain between PoisonJob ↔ run_poison ↔ spacetimedb schema.
  */
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 const PoisonJob = table({
@@ -80,9 +93,17 @@ const PoisonJob = table({
 });
 
 /**
- * Schema: `checkboxes` — up to 250,000 public rows, each with a u32 primary key
- * (0-249,999) and a 2,000-byte nibble-packed array holding 4,000 checkbox colors.
+ * Scheduled table for the periodic stats sync job.
  */
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+const SyncStatsJob = table({
+  name: 'sync_stats_job',
+  scheduled: (): any => run_sync_stats,
+}, {
+  scheduledId: t.u64().primaryKey().autoInc(),
+  scheduledAt: t.scheduleAt(),
+});
+
 const spacetimedb = schema({
   checkboxes: table(
     { name: 'checkboxes', public: true },
@@ -99,19 +120,23 @@ const spacetimedb = schema({
     }
   ),
   poisonJob: PoisonJob,
+  syncStatsJob: SyncStatsJob,
 });
 export default spacetimedb;
 
 // --- Helpers ---
 
-/** Adjust the global colored-checkbox counter by `delta` (can be negative). */
-function adjustStats(ctx: any, delta: number) {
-  const row = ctx.db.stats.id.find(0);
-  if (row) {
-    const prev = Number(row.totalColored);
-    ctx.db.stats.id.update({ ...row, totalColored: BigInt(Math.max(0, prev + delta)) });
+/** Recalculate totalColored by scanning all checkboxes rows. */
+function recalcStats(ctx: any) {
+  let total = 0;
+  for (const row of ctx.db.checkboxes.iter()) {
+    total += countColored(row.boxes);
+  }
+  const existing = ctx.db.stats.id.find(0);
+  if (existing) {
+    ctx.db.stats.id.update({ ...existing, totalColored: BigInt(total) });
   } else {
-    ctx.db.stats.insert({ id: 0, totalColored: BigInt(Math.max(0, delta)) });
+    ctx.db.stats.insert({ id: 0, totalColored: BigInt(total) });
   }
 }
 
@@ -133,19 +158,13 @@ export const toggle = spacetimedb.reducer(
     const existing = ctx.db.checkboxes.idx.find(documentIdx);
     if (existing) {
       const boxes = [...existing.boxes];
-      const oldColor = getColor(boxes, arrayIdx);
       if (setColor(boxes, arrayIdx, clampedColor)) {
         ctx.db.checkboxes.idx.update({ ...existing, boxes });
-        const wasColored = oldColor > 0 ? 1 : 0;
-        const isColored = clampedColor > 0 ? 1 : 0;
-        adjustStats(ctx, isColored - wasColored);
       }
     } else if (clampedColor > 0) {
-      // Lazily create the document on first non-zero interaction
       const boxes = emptyBoxes();
       setColor(boxes, arrayIdx, clampedColor);
       ctx.db.checkboxes.insert({ idx: documentIdx, boxes });
-      adjustStats(ctx, 1);
     }
   }
 );
@@ -155,7 +174,6 @@ export const seed = spacetimedb.reducer((ctx) => {
   for (const row of ctx.db.checkboxes.iter()) {
     ctx.db.checkboxes.idx.delete(row.idx);
   }
-  // Reset stats
   const stats = ctx.db.stats.id.find(0);
   if (stats) {
     ctx.db.stats.id.update({ ...stats, totalColored: 0n });
@@ -164,8 +182,7 @@ export const seed = spacetimedb.reducer((ctx) => {
 
 /**
  * "Poison the well" — scheduled reducer that randomly colors/uncolors 10 checkboxes
- * then re-schedules itself 10 seconds later. Uses ctx.timestamp as a PRNG seed
- * since SpacetimeDB reducers must be fully deterministic.
+ * then re-schedules itself 10 seconds later.
  */
 export const run_poison = spacetimedb.reducer(
   { arg: PoisonJob.rowType },
@@ -176,27 +193,21 @@ export const run_poison = spacetimedb.reducer(
       const val = pseudoRandom(prngSeed, i);
       const documentIdx = val % NUM_DOCUMENTS;
       const arrayIdx = (val >>> 8) % BOXES_PER_DOCUMENT;
-      const color = (val >>> 16) % 16; // 0 = uncheck, 1-15 = random color
+      const color = (val >>> 16) % 16;
 
       const row = ctx.db.checkboxes.idx.find(documentIdx);
       if (row) {
         const boxes = [...row.boxes];
-        const oldColor = getColor(boxes, arrayIdx);
         if (setColor(boxes, arrayIdx, color)) {
           ctx.db.checkboxes.idx.update({ ...row, boxes });
-          const wasColored = oldColor > 0 ? 1 : 0;
-          const isColored = color > 0 ? 1 : 0;
-          adjustStats(ctx, isColored - wasColored);
         }
       } else if (color > 0) {
         const boxes = emptyBoxes();
         setColor(boxes, arrayIdx, color);
         ctx.db.checkboxes.insert({ idx: documentIdx, boxes });
-        adjustStats(ctx, 1);
       }
     }
 
-    // Re-schedule for 10 seconds later (value is in microseconds)
     const futureTime = ctx.timestamp.microsSinceUnixEpoch + 10_000_000n;
     ctx.db.poisonJob.insert({
       scheduledId: 0n,
@@ -205,52 +216,44 @@ export const run_poison = spacetimedb.reducer(
   }
 );
 
-/** Recalculate totalColored by scanning all checkboxes rows. */
+/** Scheduled reducer: recalculate stats from ground truth, then reschedule. */
+export const run_sync_stats = spacetimedb.reducer(
+  { arg: SyncStatsJob.rowType },
+  (ctx, { arg: _arg }) => {
+    recalcStats(ctx);
+
+    // Reschedule in 30 seconds
+    const futureTime = ctx.timestamp.microsSinceUnixEpoch + 30_000_000n;
+    ctx.db.syncStatsJob.insert({
+      scheduledId: 0n,
+      scheduledAt: ScheduleAt.time(futureTime),
+    });
+  }
+);
+
+/** Manual trigger to recalculate stats. */
 export const sync_stats = spacetimedb.reducer((ctx) => {
-  let total = 0;
-  for (const row of ctx.db.checkboxes.iter()) {
-    for (let i = 0; i < row.boxes.length; i++) {
-      const byte = row.boxes[i];
-      if (byte === 0) continue;
-      if (byte & 0x0F) total++;
-      if (byte >> 4) total++;
-    }
-  }
-  const existing = ctx.db.stats.id.find(0);
-  if (existing) {
-    ctx.db.stats.id.update({ ...existing, totalColored: BigInt(total) });
-  } else {
-    ctx.db.stats.insert({ id: 0, totalColored: BigInt(total) });
-  }
+  recalcStats(ctx);
 });
 
 // --- Lifecycle ---
 
-/**
- * Runs once on first publish — schedule poison job and sync stats counter.
- */
 export const init = spacetimedb.init((ctx) => {
   // Sync stats from existing data
-  let total = 0;
-  for (const row of ctx.db.checkboxes.iter()) {
-    for (let i = 0; i < row.boxes.length; i++) {
-      const byte = row.boxes[i];
-      if (byte === 0) continue;
-      if (byte & 0x0F) total++;
-      if (byte >> 4) total++;
-    }
-  }
-  const existing = ctx.db.stats.id.find(0);
-  if (existing) {
-    ctx.db.stats.id.update({ ...existing, totalColored: BigInt(total) });
-  } else {
-    ctx.db.stats.insert({ id: 0, totalColored: BigInt(total) });
-  }
+  recalcStats(ctx);
 
-  const futureTime = ctx.timestamp.microsSinceUnixEpoch + 10_000_000n;
+  // Schedule poison job (10s interval)
+  const poisonTime = ctx.timestamp.microsSinceUnixEpoch + 10_000_000n;
   ctx.db.poisonJob.insert({
     scheduledId: 0n,
-    scheduledAt: ScheduleAt.time(futureTime),
+    scheduledAt: ScheduleAt.time(poisonTime),
+  });
+
+  // Schedule stats sync job (30s interval)
+  const syncTime = ctx.timestamp.microsSinceUnixEpoch + 30_000_000n;
+  ctx.db.syncStatsJob.insert({
+    scheduledId: 0n,
+    scheduledAt: ScheduleAt.time(syncTime),
   });
 });
 

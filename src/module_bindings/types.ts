@@ -28,3 +28,9 @@ export const Stats = __t.object("Stats", {
 });
 export type Stats = __Infer<typeof Stats>;
 
+export const SyncStatsJob = __t.object("SyncStatsJob", {
+  scheduledId: __t.u64(),
+  scheduledAt: __t.scheduleAt(),
+});
+export type SyncStatsJob = __Infer<typeof SyncStatsJob>;
+
