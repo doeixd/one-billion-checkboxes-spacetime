@@ -21,6 +21,10 @@ const BOXES_PER_DOCUMENT = 4000;
 const NUM_DOCUMENTS = Math.floor(NUM_BOXES / BOXES_PER_DOCUMENT); // 250,000
 const BYTES_PER_DOCUMENT = BOXES_PER_DOCUMENT / 2; // 2000 (4 bits per box, 2 nibbles per byte)
 
+// --- Change event constants ---
+const PRUNE_AGE_US = 10_000_000n;       // prune change events older than 10 seconds
+const PRUNE_INTERVAL_US = 5_000_000n;   // run prune job every 5 seconds
+
 // --- Game of Life constants ---
 const GOL_COLS = 50;
 const GOL_ROWS = 50;
@@ -86,6 +90,15 @@ const SyncStatsJob = table({
 });
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
+const PruneChangesJob = table({
+  name: 'prune_changes_job',
+  scheduled: (): any => run_prune_changes,
+}, {
+  scheduledId: t.u64().primaryKey().autoInc(),
+  scheduledAt: t.scheduleAt(),
+});
+
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
 const GolTickJob = table({
   name: 'gol_tick_job',
   scheduled: (): any => run_gol_tick,
@@ -100,6 +113,22 @@ const spacetimedb = schema({
     {
       idx: t.u32().primaryKey(),
       boxes: t.byteArray(),
+    }
+  ),
+  checkboxChanges: table(
+    {
+      name: 'checkbox_changes',
+      public: true,
+      indexes: [
+        { name: 'checkbox_changes_document_idx', algorithm: 'btree', columns: ['documentIdx'] },
+      ],
+    },
+    {
+      id: t.u64().primaryKey().autoInc(),
+      documentIdx: t.u32(),
+      arrayIdx: t.u32(),
+      color: t.u32(),
+      createdAt: t.u64(), // microseconds since epoch — used by pruner
     }
   ),
   stats: table(
@@ -133,6 +162,7 @@ const spacetimedb = schema({
     }
   ),
   syncStatsJob: SyncStatsJob,
+  pruneChangesJob: PruneChangesJob,
   golGrid: table(
     { name: 'gol_grid', public: true },
     {
@@ -247,17 +277,30 @@ export const toggle = spacetimedb.reducer(
     }
     const clampedColor = Math.min(color, 15);
 
+    let changed = false;
     const existing = ctx.db.checkboxes.idx.find(documentIdx);
     if (existing) {
       const boxes = new Uint8Array(existing.boxes);
-      const oldColor = getColor(boxes, arrayIdx);
       if (setColor(boxes, arrayIdx, clampedColor)) {
         ctx.db.checkboxes.idx.update({ ...existing, boxes });
+        changed = true;
       }
     } else if (clampedColor > 0) {
       const boxes = emptyBoxes();
       setColor(boxes, arrayIdx, clampedColor);
       ctx.db.checkboxes.insert({ idx: documentIdx, boxes });
+      changed = true;
+    }
+
+    // Emit a lightweight change event (~24 bytes vs 2KB full row)
+    if (changed) {
+      ctx.db.checkboxChanges.insert({
+        id: 0n,
+        documentIdx,
+        arrayIdx,
+        color: clampedColor,
+        createdAt: ctx.timestamp.microsSinceUnixEpoch,
+      });
     }
   }
 );
@@ -302,6 +345,31 @@ export const run_sync_stats = spacetimedb.reducer(
     ctx.db.syncStatsJob.insert({
       scheduledId: 0n,
       scheduledAt: ScheduleAt.time(futureTime),
+    });
+  }
+);
+
+/** Scheduled reducer: prune old change events, then reschedule. */
+export const run_prune_changes = spacetimedb.reducer(
+  { arg: PruneChangesJob.rowType },
+  (ctx, { arg: _arg }) => {
+    // Only delete events older than PRUNE_AGE_US — recent events may still
+    // be needed by clients in Phase 1→2 transition.
+    const cutoff = ctx.timestamp.microsSinceUnixEpoch - PRUNE_AGE_US;
+    const toDelete: bigint[] = [];
+    for (const row of ctx.db.checkboxChanges.iter()) {
+      if (row.createdAt < cutoff) {
+        toDelete.push(row.id);
+      }
+    }
+    for (const id of toDelete) {
+      ctx.db.checkboxChanges.id.delete(id);
+    }
+
+    // Reschedule
+    ctx.db.pruneChangesJob.insert({
+      scheduledId: 0n,
+      scheduledAt: ScheduleAt.time(ctx.timestamp.microsSinceUnixEpoch + PRUNE_INTERVAL_US),
     });
   }
 );
@@ -485,6 +553,12 @@ export const init = spacetimedb.init((ctx) => {
     scheduledId: 0n,
     scheduledAt: ScheduleAt.time(ctx.timestamp.microsSinceUnixEpoch + GOL_TICK_INTERVAL_US),
   });
+
+  // Start the change-event prune loop
+  ctx.db.pruneChangesJob.insert({
+    scheduledId: 0n,
+    scheduledAt: ScheduleAt.time(ctx.timestamp.microsSinceUnixEpoch + PRUNE_INTERVAL_US),
+  });
 });
 
 export const onConnect = spacetimedb.clientConnected((ctx) => {
@@ -501,6 +575,19 @@ export const onConnect = spacetimedb.clientConnected((ctx) => {
     ctx.db.golTickJob.insert({
       scheduledId: 0n,
       scheduledAt: ScheduleAt.time(ctx.timestamp.microsSinceUnixEpoch + GOL_TICK_INTERVAL_US),
+    });
+  }
+
+  // Ensure the change-event prune loop is running
+  let hasPruneJob = false;
+  for (const _ of ctx.db.pruneChangesJob.iter()) {
+    hasPruneJob = true;
+    break;
+  }
+  if (!hasPruneJob) {
+    ctx.db.pruneChangesJob.insert({
+      scheduledId: 0n,
+      scheduledAt: ScheduleAt.time(ctx.timestamp.microsSinceUnixEpoch + PRUNE_INTERVAL_US),
     });
   }
 });

@@ -31,10 +31,6 @@ export const [isConnected, setIsConnected] = createSignal(false);
 export const [currentPath, setCurrentPath] = createSignal(window.location.pathname);
 window.addEventListener('popstate', () => setCurrentPath(window.location.pathname));
 
-export function navigate(to: string) {
-  window.history.pushState({}, '', to);
-  setCurrentPath(to);
-}
 
 const onConnect = (conn: DbConnection, _identity: Identity, token: string) => {
   localStorage.setItem(TOKEN_KEY, token);

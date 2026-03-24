@@ -10,6 +10,15 @@ import {
   type Infer as __Infer,
 } from "spacetimedb";
 
+export const CheckboxChanges = __t.object("CheckboxChanges", {
+  id: __t.u64(),
+  documentIdx: __t.u32(),
+  arrayIdx: __t.u32(),
+  color: __t.u32(),
+  createdAt: __t.u64(),
+});
+export type CheckboxChanges = __Infer<typeof CheckboxChanges>;
+
 export const Checkboxes = __t.object("Checkboxes", {
   idx: __t.u32(),
   boxes: __t.byteArray(),
@@ -41,6 +50,12 @@ export const IdentityFingerprint = __t.object("IdentityFingerprint", {
   fingerprint: __t.string(),
 });
 export type IdentityFingerprint = __Infer<typeof IdentityFingerprint>;
+
+export const PruneChangesJob = __t.object("PruneChangesJob", {
+  scheduledId: __t.u64(),
+  scheduledAt: __t.scheduleAt(),
+});
+export type PruneChangesJob = __Infer<typeof PruneChangesJob>;
 
 export const RateLimit = __t.object("RateLimit", {
   identity: __t.identity(),

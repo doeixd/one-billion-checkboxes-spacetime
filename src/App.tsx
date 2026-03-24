@@ -25,10 +25,10 @@ import {
   Show,
   Loading,
 } from "solid-js";
-import { conn, isConnected, navigate } from "./main.tsx";
+import { conn, isConnected } from "./main.tsx";
 import type { EventContext } from "./module_bindings/index.ts";
 import type { SubscriptionHandle } from "./module_bindings/index.ts";
-import type { Checkboxes, Stats } from "./module_bindings/types.ts";
+import type { Checkboxes, CheckboxChanges, Stats } from "./module_bindings/types.ts";
 
 // ─── Constants ────────────────────────────────────────────────────────────────
 
@@ -63,11 +63,25 @@ function getColor(boxes: ArrayLike<number>, arrayIdx: number): number {
   return arrayIdx % 2 === 0 ? byte & 0x0f : (byte >> 4) & 0x0f;
 }
 
+/** Apply a nibble change to a byte array in-place. */
+function setColorLocal(boxes: Uint8Array, arrayIdx: number, color: number): void {
+  const byteIdx = Math.floor(arrayIdx / 2);
+  const byte = boxes[byteIdx] || 0;
+  boxes[byteIdx] = arrayIdx % 2 === 0
+    ? (byte & 0xf0) | (color & 0x0f)
+    : (byte & 0x0f) | ((color & 0x0f) << 4);
+}
+
 // ─── Component ────────────────────────────────────────────────────────────────
 
 export default function App() {
   // ── Data state ──────────────────────────────────────────────────────────
   const [boxesStore, setBoxesStore] = createStore<Record<number, Uint8Array>>({});
+  // Raw Uint8Array data parallel to boxesStore. SolidJS wraps store values in
+  // Proxies which break TypedArray operations (new Uint8Array(proxy),
+  // Uint8Array.from(proxy), proxy.slice(), etc.). Mutations read from rawBoxes
+  // to avoid Proxy issues; boxesStore is used only for rendering reactivity.
+  const rawBoxes: Record<number, Uint8Array> = {};
 
   const [totalColored, setTotalColored] = createSignal(0n);
   const [pendingCountDelta, setPendingCountDelta] = createSignal(0);
@@ -94,17 +108,36 @@ export default function App() {
   let subscribedMin = -1;
   let subscribedMax = -1;
   let subDebounceTimer = 0;
+  let subGeneration = 0; // monotonic counter to detect stale callbacks
 
   // ── Pending optimistic writes ─────────────────────────────────────────
   const [pendingStore, setPendingStore] = createStore<Record<number, Record<number, number>>>({});
 
   // ── Round-trip timing ─────────────────────────────────────────────────
-  const inflightDocs = new Map<number, { time: number; count: number }>();
+  // Keyed by "docIdx:arrayIdx" so foreign change events (other users clicking
+  // a different cell in the same document) don't steal our inflight counts.
+  const inflightCells = new Map<string, { time: number; count: number }>();
   const [pendingToggleCount, setPendingToggleCount] = createSignal(0);
   const [lastRoundTripMs, setLastRoundTripMs] = createSignal<number | null>(
     null,
   );
   let roundTripFadeTimer = 0;
+  let inflightGcTimer = 0;
+
+  /** Periodically clear stale inflight cells (safety net for missed events). */
+  const INFLIGHT_STALE_MS = 8000;
+  const gcInflightCells = () => {
+    const now = performance.now();
+    for (const [key, inflight] of inflightCells) {
+      if (now - inflight.time > INFLIGHT_STALE_MS) {
+        inflightCells.delete(key);
+        setPendingToggleCount((c) => Math.max(0, c - inflight.count));
+      }
+    }
+    inflightGcTimer = inflightCells.size > 0
+      ? window.setTimeout(gcInflightCells, 2000)
+      : 0;
+  };
 
   // ── Client-side rate limiting (matches server: 20 toggles/sec) ───────
   const RATE_LIMIT_WINDOW = 1000; // ms
@@ -142,31 +175,41 @@ export default function App() {
       cancelAnimationFrame(rafId);
       clearTimeout(roundTripFadeTimer);
       clearTimeout(subDebounceTimer);
+      clearTimeout(inflightGcTimer);
       if (currentSubHandle && !currentSubHandle.isEnded()) {
         currentSubHandle.unsubscribe();
       }
+      if (phase1Handle && !phase1Handle.isEnded()) {
+        phase1Handle.unsubscribe();
+      }
     });
 
-    // SpacetimeDB event handlers — checkboxes
+    // SpacetimeDB event handlers — checkboxes (full doc updates during Phase 1).
+    // Change event handlers resolve per-cell first; this is the fallback that
+    // catches anything remaining (e.g., if change events haven't arrived yet).
     const upsertRow = (row: Checkboxes) => {
+      rawBoxes[row.idx] = row.boxes;
       setBoxesStore(s => { s[row.idx] = row.boxes; });
 
+      // Fallback: clear any remaining pending entries for this document
       if (pendingStore[row.idx]) {
         setPendingStore(s => { delete s[row.idx]; });
       }
 
-      const inflight = inflightDocs.get(row.idx);
-      if (inflight) {
-        inflightDocs.delete(row.idx);
-        const ms = Math.round(performance.now() - inflight.time);
-        setLastRoundTripMs(ms);
-        setPendingToggleCount((c) => Math.max(0, c - inflight.count));
-
-        clearTimeout(roundTripFadeTimer);
-        roundTripFadeTimer = window.setTimeout(
-          () => setLastRoundTripMs(null),
-          2000,
-        );
+      // Fallback: resolve any remaining inflight cells for this document
+      const prefix = `${row.idx}:`;
+      for (const [key, inflight] of inflightCells) {
+        if (key.startsWith(prefix)) {
+          inflightCells.delete(key);
+          const ms = Math.round(performance.now() - inflight.time);
+          setLastRoundTripMs(ms);
+          setPendingToggleCount((c) => Math.max(0, c - inflight.count));
+          clearTimeout(roundTripFadeTimer);
+          roundTripFadeTimer = window.setTimeout(
+            () => setLastRoundTripMs(null),
+            2000,
+          );
+        }
       }
     };
 
@@ -177,18 +220,62 @@ export default function App() {
       (_ctx: EventContext, _old: Checkboxes, row: Checkboxes) => upsertRow(row),
     );
 
-    conn.db.checkboxes.onDelete((_ctx: EventContext, row: Checkboxes) => {
-      setBoxesStore(s => { delete s[row.idx]; });
+    // When unsubscribing from full docs (Phase 2), SpacetimeDB fires onDelete
+    // for every row leaving the subscription. We keep boxesStore intact —
+    // change events will keep it current. Memory cost is trivial (~2KB/doc).
+    conn.db.checkboxes.onDelete((_ctx: EventContext, _row: Checkboxes) => {});
 
-      if (pendingStore[row.idx]) {
-        setPendingStore(s => { delete s[row.idx]; });
+    // SpacetimeDB event handlers — lightweight change events
+    conn.db.checkboxChanges.onInsert((_ctx: EventContext, change: CheckboxChanges) => {
+      const { documentIdx, arrayIdx, color } = change;
+      // Apply nibble delta to the raw (non-Proxy) Uint8Array, then sync
+      // a fresh copy to the SolidJS store for reactivity.
+      const existing = rawBoxes[documentIdx];
+      if (existing) {
+        setColorLocal(existing, arrayIdx, color);
+        setBoxesStore(s => { s[documentIdx] = new Uint8Array(existing); });
+      } else {
+        // Document was lazily created by this toggle — not in boxesStore yet
+        const boxes = new Uint8Array(2000);
+        setColorLocal(boxes, arrayIdx, color);
+        rawBoxes[documentIdx] = boxes;
+        setBoxesStore(s => { s[documentIdx] = new Uint8Array(boxes); });
       }
-      const inflight = inflightDocs.get(row.idx);
+
+      // Clear pending overlay for this specific cell
+      if (pendingStore[documentIdx]?.[arrayIdx] !== undefined) {
+        setPendingStore(s => {
+          if (s[documentIdx]) {
+            delete s[documentIdx][arrayIdx];
+            if (Object.keys(s[documentIdx]).length === 0) {
+              delete s[documentIdx];
+            }
+          }
+        });
+      }
+
+      // Resolve inflight timing — keyed per-cell so foreign users' change
+      // events on the same document don't steal our inflight counts.
+      const cellKey = `${documentIdx}:${arrayIdx}`;
+      const inflight = inflightCells.get(cellKey);
       if (inflight) {
-        inflightDocs.delete(row.idx);
-        setPendingToggleCount((c) => Math.max(0, c - inflight.count));
+        const newCount = inflight.count - 1;
+        if (newCount <= 0) {
+          inflightCells.delete(cellKey);
+          const ms = Math.round(performance.now() - inflight.time);
+          setLastRoundTripMs(ms);
+          setPendingToggleCount((c) => Math.max(0, c - 1));
+          clearTimeout(roundTripFadeTimer);
+          roundTripFadeTimer = window.setTimeout(() => setLastRoundTripMs(null), 2000);
+        } else {
+          inflightCells.set(cellKey, { ...inflight, count: newCount });
+          setPendingToggleCount((c) => Math.max(0, c - 1));
+        }
       }
     });
+
+    // Pruned change events — no action needed
+    conn.db.checkboxChanges.onDelete((_ctx: EventContext, _change: CheckboxChanges) => {});
 
     // SpacetimeDB event handlers — stats (global colored count)
     const upsertStats = (row: Stats) => {
@@ -267,41 +354,111 @@ export default function App() {
     return docIdx >= subscribedMin && docIdx <= subscribedMax;
   };
 
-  /** Subscribe to the given document range, swapping out the old subscription. */
+  /** Build change-event-only queries for a document range. */
+  // SQL uses snake_case column names (document_idx), not the camelCase from generated types.
+  const changeQueries = (range: { min: number; max: number; wraps: boolean }) =>
+    range.wraps
+      ? [
+          `SELECT * FROM checkbox_changes WHERE document_idx >= ${range.min}`,
+          `SELECT * FROM checkbox_changes WHERE document_idx <= ${range.max}`,
+        ]
+      : [`SELECT * FROM checkbox_changes WHERE document_idx >= ${range.min} AND document_idx <= ${range.max}`];
+
+  /**
+   * Two-phase subscription for a document range (no table overlap).
+   *
+   * Phase 1: Subscribe to full checkboxes rows ONLY.
+   *          Once onApplied fires, boxesStore has all docs for this range.
+   *
+   * Phase 2: Subscribe to checkbox_changes ONLY, then drop Phase 1.
+   *          Live updates cost ~24 bytes instead of ~2KB. No subscription
+   *          overlap (different tables) → exactly 1 message per toggle.
+   */
+  let phase1Handle: SubscriptionHandle | null = null;
+
+  /** Safely unsubscribe a handle, ignoring already-ended handles. */
+  const safeUnsub = (h: SubscriptionHandle | null) => {
+    if (!h) return;
+    try { if (!h.isEnded()) h.unsubscribe(); } catch { /* already ended */ }
+  };
+
   const subscribeToRange = (range: { min: number; max: number; wraps: boolean }) => {
-    const queries = range.wraps
+    const fullQueries = range.wraps
       ? [
           `SELECT * FROM checkboxes WHERE idx >= ${range.min}`,
           `SELECT * FROM checkboxes WHERE idx <= ${range.max}`,
         ]
       : [`SELECT * FROM checkboxes WHERE idx >= ${range.min} AND idx <= ${range.max}`];
 
-    const oldHandle = currentSubHandle;
-    currentSubHandle = conn
+    // Bump generation so stale onApplied callbacks become no-ops
+    const gen = ++subGeneration;
+
+    // Collect ALL handles that need cleanup (Set deduplicates)
+    const toCleanup = new Set<SubscriptionHandle>();
+    if (currentSubHandle) toCleanup.add(currentSubHandle);
+    if (phase1Handle) toCleanup.add(phase1Handle);
+
+    // Phase 1: full docs ONLY (no checkbox_changes — avoids subscription
+    // overlap that causes duplicate messages when Phase 2 also covers changes)
+    const p1Handle = conn
       .subscriptionBuilder()
       .onApplied(() => {
-        // Unsubscribe old after new is applied — ensures no gap
-        if (oldHandle && !oldHandle.isEnded()) {
-          oldHandle.unsubscribe();
+        // Stale callback — a newer subscribeToRange already took over
+        if (gen !== subGeneration) {
+          safeUnsub(p1Handle);
+          return;
         }
+
+        // Clean up all previous handles
+        for (const h of toCleanup) safeUnsub(h);
+
         if (!subscriptionResolved) {
           subscriptionResolved = true;
           resolveSubscription();
         }
-      })
-      .subscribe(queries);
 
+        // Phase 2: change events only — lightweight live updates (24 bytes
+        // instead of 2KB). No overlap with Phase 1 (different tables).
+        currentSubHandle = conn
+          .subscriptionBuilder()
+          .onApplied(() => {
+            // Stale — a newer subscribeToRange already took over
+            if (gen !== subGeneration) return;
+            // Phase 2 is live — drop Phase 1 (full docs)
+            safeUnsub(p1Handle);
+            if (phase1Handle === p1Handle) phase1Handle = null;
+          })
+          .subscribe(changeQueries(range));
+      })
+      .subscribe(fullQueries);
+
+    phase1Handle = p1Handle;
     subscribedMin = range.min;
     subscribedMax = range.max;
   };
 
-  /** Effect: watch visible range and update subscription when needed. */
+  // Reset subscription state on disconnect so reconnect triggers a fresh Phase 1.
+  // Without this, subscribedMin/Max retain stale values and isInSubscribedRange
+  // would prevent re-subscribing even though the old handles are dead.
   createEffect(
-    () => visibleDocRange(),
-    (range) => {
-      if (!range) return;
+    () => isConnected(),
+    (connected) => {
+      if (!connected) {
+        subscribedMin = -1;
+        subscribedMax = -1;
+        currentSubHandle = null;
+        phase1Handle = null;
+      }
+    },
+  );
 
-      // First subscription — immediate
+  /** Effect: watch visible range and connection state, update subscription. */
+  createEffect(
+    () => ({ range: visibleDocRange(), connected: isConnected() }),
+    ({ range, connected }) => {
+      if (!range || !connected) return;
+
+      // First subscription or reconnect — immediate
       if (subscribedMin === -1) {
         subscribeToRange(range);
         return;
@@ -385,12 +542,14 @@ export default function App() {
       s[documentIdx][arrayIdx] = newColor;
     });
 
-    const existing = inflightDocs.get(documentIdx);
-    inflightDocs.set(documentIdx, {
+    const cellKey = `${documentIdx}:${arrayIdx}`;
+    const existing = inflightCells.get(cellKey);
+    inflightCells.set(cellKey, {
       time: existing?.time ?? performance.now(),
       count: (existing?.count ?? 0) + 1,
     });
     setPendingToggleCount((c) => c + 1);
+    if (!inflightGcTimer) inflightGcTimer = window.setTimeout(gcInflightCells, 2000);
 
     conn.reducers.toggle({ documentIdx, arrayIdx, color: newColor }).catch(() => {
       setRateLimited(true);
@@ -567,7 +726,6 @@ export default function App() {
         >
           <a
             href="/life"
-            onClick={(e: MouseEvent) => { e.preventDefault(); navigate('/life'); }}
             style={{ "text-decoration": "none", color: "#6b7280", "font-weight": "600" }}
           >
             Game of Life

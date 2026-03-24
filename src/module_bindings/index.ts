@@ -44,6 +44,7 @@ import ToggleReducer from "./toggle_reducer";
 // Import all procedure arg schemas
 
 // Import all table schema definitions
+import CheckboxChangesRow from "./checkbox_changes_table";
 import CheckboxesRow from "./checkboxes_table";
 import GolGridRow from "./gol_grid_table";
 import StatsRow from "./stats_table";
@@ -52,6 +53,17 @@ import StatsRow from "./stats_table";
 
 /** The schema information for all tables in this module. This is defined the same was as the tables would have been defined in the server. */
 const tablesSchema = __schema({
+  checkboxChanges: __table({
+    name: 'checkbox_changes',
+    indexes: [
+      { accessor: 'id', name: 'checkbox_changes_id_idx_btree', algorithm: 'btree', columns: [
+        'id',
+      ] },
+    ],
+    constraints: [
+      { name: 'checkbox_changes_id_key', constraint: 'unique', columns: ['id'] },
+    ],
+  }, CheckboxChangesRow),
   checkboxes: __table({
     name: 'checkboxes',
     indexes: [

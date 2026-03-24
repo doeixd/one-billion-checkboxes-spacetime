@@ -17,7 +17,7 @@ import {
   Show,
   Loading,
 } from "solid-js";
-import { conn, isConnected, navigate } from "./main.tsx";
+import { conn, isConnected } from "./main.tsx";
 import type { EventContext } from "./module_bindings/index.ts";
 import type { GolGrid } from "./module_bindings/types.ts";
 
@@ -133,10 +133,6 @@ export default function GameOfLife() {
         <div style={{ display: "flex", "align-items": "center", gap: "8px" }}>
           <a
             href="/"
-            onClick={(e: MouseEvent) => {
-              e.preventDefault();
-              navigate("/");
-            }}
             style={{
               color: "#6b7280",
               "text-decoration": "none",
