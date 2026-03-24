@@ -14,10 +14,11 @@
  *   A scheduled "sync_stats" job runs every 5 seconds to recalculate the global
  *   colored-checkbox count from ground truth (full scan of all document rows).
  */
-import { schema, table, t } from 'spacetimedb/server';
-import { ScheduleAt } from 'spacetimedb';
+import { schema, table, t, SenderError } from 'spacetimedb/server';
+import { ScheduleAt, Identity } from 'spacetimedb';
 
 // --- Constants ---
+const OWNER = Identity.fromString('c20036cec45c9902116128ccc5adaed19dd340abfd61c1be811d513710d75b54');
 const NUM_BOXES = 1_000_000_000;
 const BOXES_PER_DOCUMENT = 4000;
 const NUM_DOCUMENTS = Math.floor(NUM_BOXES / BOXES_PER_DOCUMENT); // 250,000
@@ -106,22 +107,14 @@ const SyncStatsJob = table({
 
 const spacetimedb = schema({
   checkboxes: table(
-    {
-      name: 'checkboxes',
-      public: true,
-      indexes: [{ name: 'checkboxes_idx', algorithm: 'btree', columns: ['idx'] }],
-    },
+    { name: 'checkboxes', public: true },
     {
       idx: t.u32().primaryKey(),
       boxes: t.byteArray(),
     }
   ),
   stats: table(
-    {
-      name: 'stats',
-      public: true,
-      indexes: [{ name: 'stats_id', algorithm: 'btree', columns: ['id'] }],
-    },
+    { name: 'stats', public: true },
     {
       id: t.u32().primaryKey(),
       totalColored: t.u64(),
@@ -243,8 +236,9 @@ export const toggle = spacetimedb.reducer(
   }
 );
 
-/** Reset all checkboxes to unchecked by deleting all document rows. */
+/** Reset all checkboxes to unchecked by deleting all document rows. Owner only. */
 export const seed = spacetimedb.reducer((ctx) => {
+  if (!ctx.sender.isEqual(OWNER)) throw new SenderError('Unauthorized');
   for (const row of ctx.db.checkboxes.iter()) {
     ctx.db.checkboxes.idx.delete(row.idx);
   }
@@ -271,7 +265,7 @@ export const run_poison = spacetimedb.reducer(
 
       const row = ctx.db.checkboxes.idx.find(documentIdx);
       if (row) {
-        const boxes = [...row.boxes];
+        const boxes = new Uint8Array(row.boxes);
         if (setColor(boxes, arrayIdx, color)) {
           ctx.db.checkboxes.idx.update({ ...row, boxes });
         }
@@ -305,8 +299,9 @@ export const run_sync_stats = spacetimedb.reducer(
   }
 );
 
-/** Manual trigger to recalculate stats. */
+/** Manual trigger to recalculate stats. Owner only. */
 export const sync_stats = spacetimedb.reducer((ctx) => {
+  if (!ctx.sender.isEqual(OWNER)) throw new SenderError('Unauthorized');
   recalcStats(ctx);
 });
 
