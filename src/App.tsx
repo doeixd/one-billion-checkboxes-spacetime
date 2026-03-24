@@ -113,8 +113,8 @@ export default function App() {
   );
 
   // ── Round-trip timing ─────────────────────────────────────────────────
-  // Tracks in-flight toggle times per document to compute round-trip ms.
-  const inflightTimes = new Map<number, number>();
+  // Per-document: { time: earliest pending timestamp, count: toggles in-flight }
+  const inflightDocs = new Map<number, { time: number; count: number }>();
   const [pendingToggleCount, setPendingToggleCount] = createSignal(0);
   const [lastRoundTripMs, setLastRoundTripMs] = createSignal<number | null>(null);
   let roundTripFadeTimer = 0;
@@ -170,14 +170,13 @@ export default function App() {
       });
 
       // Compute round-trip time
-      const startTime = inflightTimes.get(row.idx);
-      if (startTime !== undefined) {
-        inflightTimes.delete(row.idx);
-        const ms = Math.round(performance.now() - startTime);
+      const inflight = inflightDocs.get(row.idx);
+      if (inflight) {
+        inflightDocs.delete(row.idx);
+        const ms = Math.round(performance.now() - inflight.time);
         setLastRoundTripMs(ms);
-        setPendingToggleCount(c => Math.max(0, c - 1));
+        setPendingToggleCount(c => Math.max(0, c - inflight.count));
 
-        // Keep the ms visible for 2s then clear
         clearTimeout(roundTripFadeTimer);
         roundTripFadeTimer = window.setTimeout(() => setLastRoundTripMs(null), 2000);
       }
@@ -253,8 +252,12 @@ export default function App() {
       return next;
     });
 
-    // Track round-trip timing
-    inflightTimes.set(documentIdx, performance.now());
+    // Track round-trip timing — keep earliest timestamp per doc, increment count
+    const existing = inflightDocs.get(documentIdx);
+    inflightDocs.set(documentIdx, {
+      time: existing?.time ?? performance.now(),
+      count: (existing?.count ?? 0) + 1,
+    });
     setPendingToggleCount(c => c + 1);
 
     conn.reducers.toggle({ documentIdx, arrayIdx, color: newColor });
