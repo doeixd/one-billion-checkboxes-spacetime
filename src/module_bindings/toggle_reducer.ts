@@ -13,5 +13,5 @@ import {
 export default {
   documentIdx: __t.u32(),
   arrayIdx: __t.u32(),
-  checked: __t.bool(),
+  color: __t.u32(),
 };

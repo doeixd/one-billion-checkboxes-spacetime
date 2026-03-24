@@ -7,23 +7,17 @@
     "dev": "vite",
     "build": "tsc -b && vite build",
     "preview": "vite preview",
-    "generate": "cargo run -p gen-bindings -- --out-dir src/module_bindings --module-path spacetimedb && prettier --write src/module_bindings",
     "spacetime:generate": "spacetime generate --lang typescript --out-dir src/module_bindings --project-path spacetimedb",
     "spacetime:publish:local": "spacetime publish --project-path server --server local",
     "spacetime:publish": "spacetime publish --project-path server --server maincloud"
   },
   "dependencies": {
-    "react": "^18.3.1",
-    "react-dom": "^18.3.1",
-    "react-use": "=17.6.0",
-    "react-window": "=2.2.7",
+    "solid-js": "^2.0.0-beta.0",
     "spacetimedb": "=2.0.2"
   },
   "devDependencies": {
-    "@types/react": "^18.3.18",
-    "@types/react-dom": "^18.3.5",
-    "@vitejs/plugin-react": "^5.0.2",
-    "typescript": "~5.6.2",
-    "vite": "^7.1.5"
+    "vite": "^7.1.5",
+    "vite-plugin-solid": "next",
+    "typescript": "~5.6.2"
   }
 }
