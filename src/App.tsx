@@ -108,7 +108,6 @@ export default function App() {
 
   const isSyncing = () => isPending(() => gridReady());
 
-
   // ── Pending optimistic writes ─────────────────────────────────────────
   const [pendingUpdates, setPendingUpdates] = createSignal(
     new Map<number, Map<number, number>>(),
@@ -410,7 +409,7 @@ export default function App() {
             <For each={PALETTE} keyed={false}>
               {(colorAccessor, i) => (
                 <button
-                  onClick={(e) => {
+                  onClick={() => {
                     setSelectedColor(i());
                   }}
                   title={i() === 0 ? "Clear (uncheck)" : `Color ${i()}`}
