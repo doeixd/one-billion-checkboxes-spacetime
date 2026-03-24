@@ -57,7 +57,7 @@ import type { Checkboxes } from './module_bindings/types.ts';
 
 const NUM_BOXES = 1_000_000_000;
 const NUM_DOCUMENTS = 250_000;
-const CELL_SIZE = 12; // px
+const CELL_SIZE = 22; // px
 const OVERSCAN = 3;   // extra rows rendered beyond the visible edge
 
 /**
@@ -609,11 +609,20 @@ export default function App() {
                                 height: `${CELL_SIZE - 2}px`,
                                 'background-color': bg(),
                                 border: `1px solid ${border()}`,
-                                'border-radius': '1px',
+                                'border-radius': '3px',
                                 'box-sizing': 'border-box',
                                 cursor: loading() ? 'default' : 'pointer',
+                                transition: 'background-color 0.1s ease-out, border-color 0.1s ease-out',
+                                display: 'flex',
+                                'align-items': 'center',
+                                'justify-content': 'center',
+                                'font-size': '12px',
+                                'line-height': '1',
+                                color: '#fff',
                               }}
-                            />
+                            >
+                              {isColored() ? '✓' : ''}
+                            </div>
                           </div>
                         );
                       }}
