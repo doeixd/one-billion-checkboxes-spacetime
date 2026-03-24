@@ -7,7 +7,7 @@
  * reactively without needing a context provider.
  */
 import { createSignal } from 'solid-js';
-import { render } from 'solid-js/web';
+import { render } from '@solidjs/web';
 import App from './App.tsx';
 import { DbConnection } from './module_bindings/index.ts';
 import type { ErrorContext } from './module_bindings/index.ts';

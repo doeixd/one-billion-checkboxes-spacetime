@@ -442,14 +442,14 @@ export default function App() {
             <For each={PALETTE} keyed={false}>
               {(colorAccessor, i) => (
                 <button
-                  onClick={() => setSelectedColor(i)}
-                  title={i === 0 ? 'Clear (uncheck)' : `Color ${i}`}
+                  onClick={() => setSelectedColor(i())}
+                  title={i() === 0 ? 'Clear (uncheck)' : `Color ${i()}`}
                   style={{
                     width: '20px',
                     height: '20px',
-                    'background-color': i === 0 ? '#fff' : colorAccessor(),
+                    'background-color': i() === 0 ? '#fff' : colorAccessor(),
                     border:
-                      selectedColor() === i
+                      selectedColor() === i()
                         ? '2px solid #1f2937'
                         : '1px solid #d1d5db',
                     'border-radius': '3px',
@@ -463,7 +463,7 @@ export default function App() {
                     'flex-shrink': '0',
                   }}
                 >
-                  {i === 0 ? '✕' : ''}
+                  {i() === 0 ? '✕' : ''}
                 </button>
               )}
             </For>
@@ -504,7 +504,8 @@ export default function App() {
           Once subscriptionReady resolves, <Loading> renders the grid permanently —
           real-time WebSocket updates flow through signals, not new async boundaries.
         */}
-        <Loading on={subscriptionReady} fallback={
+        {/* eslint-disable-next-line @typescript-eslint/no-explicit-any */}
+        <Loading {...{ on: subscriptionReady } as any} fallback={
           <div style={{
             display: 'flex',
             'flex-direction': 'column',
@@ -563,7 +564,7 @@ export default function App() {
                   <div
                     style={{
                       position: 'absolute',
-                      top: `${rowIdx * CELL_SIZE}px`,
+                      top: `${rowIdx() * CELL_SIZE}px`,
                       left: '0',
                       height: `${CELL_SIZE}px`,
                       display: 'flex',
@@ -576,7 +577,7 @@ export default function App() {
                     */}
                     <For each={columnIndices()}>
                       {(colIdx) => {
-                        const index = rowIdx * numColumns() + colIdx;
+                        const index = rowIdx() * numColumns() + colIdx();
                         if (index >= NUM_BOXES) return null;
 
                         // Stripe across documents so adjacent cells on
