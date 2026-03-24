@@ -112,6 +112,9 @@ export default function App() {
   let rateLimitStart = 0;
   let rateLimitCount = 0;
 
+  const [rateLimited, setRateLimited] = createSignal(false);
+  let rateLimitFadeTimer = 0;
+
   // ── UI state ──────────────────────────────────────────────────────────
   const [selectedColor, setSelectedColor] = createSignal(1);
 
@@ -357,7 +360,12 @@ export default function App() {
       rateLimitStart = now;
       rateLimitCount = 0;
     }
-    if (++rateLimitCount > RATE_LIMIT_MAX) return;
+    if (++rateLimitCount > RATE_LIMIT_MAX) {
+      setRateLimited(true);
+      clearTimeout(rateLimitFadeTimer);
+      rateLimitFadeTimer = window.setTimeout(() => setRateLimited(false), 2000);
+      return;
+    }
 
     const currentColor = getCellColor(documentIdx, arrayIdx);
     const newColor =
@@ -474,6 +482,17 @@ export default function App() {
                   }}
                 />
               </Show>
+            </span>
+            <span
+              style={{
+                "font-size": "0.7rem",
+                "font-weight": "600",
+                color: "#dc2626",
+                opacity: rateLimited() ? "1" : "0",
+                transition: "opacity 0.2s ease-out",
+              }}
+            >
+              Rate Limited
             </span>
           </div>
           <div
