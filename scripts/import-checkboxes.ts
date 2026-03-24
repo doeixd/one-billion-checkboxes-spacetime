@@ -27,9 +27,9 @@ if (!TOKEN) {
 }
 
 // New layout constants (must match server after Phase 2)
-const NEW_BOXES_PER_DOC = 500;
-const NEW_NUM_DOCUMENTS = 2_000_000;
-const NEW_BYTES_PER_DOC = NEW_BOXES_PER_DOC / 2; // 250
+const NEW_BOXES_PER_DOC = 4000;
+const NEW_NUM_DOCUMENTS = 250_000;
+const NEW_BYTES_PER_DOC = NEW_BOXES_PER_DOC / 2; // 2000
 
 function setColor(boxes: Uint8Array, arrayIdx: number, color: number): void {
   const byteIdx = Math.floor(arrayIdx / 2);

@@ -22,7 +22,7 @@ const HOST = process.env.SPACETIMEDB_HOST ?? 'wss://maincloud.spacetimedb.com';
 const DB_NAME = process.env.SPACETIMEDB_DB_NAME ?? 'deni-x4u44';
 const OUT_FILE = process.env.OUT_FILE ?? 'scripts/checkboxes-export.json';
 
-const NUM_DOCUMENTS = 250_000;
+const NUM_DOCUMENTS = 2_000_000;
 
 function getColor(boxes: ArrayLike<number>, arrayIdx: number): number {
   const byte = boxes[Math.floor(arrayIdx / 2)] || 0;
