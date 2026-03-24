@@ -6,13 +6,32 @@
     <title>One Billion Checkboxes</title>
     <style>
       @keyframes spin {
-        to { transform: rotate(360deg); }
+        to {
+          transform: rotate(360deg);
+        }
       }
-      * { box-sizing: border-box; margin: 0; padding: 0; }
-      body { overflow: hidden; }
+      * {
+        box-sizing: border-box;
+        margin: 0;
+        padding: 0;
+      }
+      body {
+        overflow: hidden;
+      }
+
+      /* ── Checkbox cell transitions ─────────────────────────── */
+      .cell {
+        border-radius: 3px;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        font-size: 12px;
+        line-height: 1;
+      }
+
     </style>
   </head>
-  <body>
+  <body class="unloaded">
     <div id="root"></div>
     <script type="module" src="/src/main.tsx"></script>
   </body>

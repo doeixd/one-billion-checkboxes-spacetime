@@ -23,42 +23,42 @@ import {
   For,
   Show,
   Loading,
-} from 'solid-js';
-import { conn, isConnected } from './main.tsx';
-import type { EventContext } from './module_bindings/index.ts';
-import type { Checkboxes } from './module_bindings/types.ts';
+} from "solid-js";
+import { conn, isConnected } from "./main.tsx";
+import type { EventContext } from "./module_bindings/index.ts";
+import type { Checkboxes } from "./module_bindings/types.ts";
 
 // ─── Constants ────────────────────────────────────────────────────────────────
 
 const NUM_BOXES = 1_000_000_000;
 const NUM_DOCUMENTS = 250_000;
 const CELL_SIZE = 22; // px
-const OVERSCAN = 3;   // extra rows above/below viewport
+const OVERSCAN = 3; // extra rows above/below viewport
 
 const PALETTE: string[] = [
-  '#f3f4f6', // 0: clear / uncheck
-  '#111827', // 1: near-black
-  '#dc2626', // 2: red
-  '#ea580c', // 3: orange
-  '#d97706', // 4: amber
-  '#16a34a', // 5: green
-  '#0891b2', // 6: cyan
-  '#2563eb', // 7: blue
-  '#7c3aed', // 8: purple
-  '#db2777', // 9: pink
-  '#f87171', // 10: light red
-  '#fb923c', // 11: light orange
-  '#fbbf24', // 12: yellow
-  '#4ade80', // 13: light green
-  '#38bdf8', // 14: sky blue
-  '#a78bfa', // 15: lavender
+  "#f3f4f6", // 0: clear / uncheck
+  "#111827", // 1: near-black
+  "#dc2626", // 2: red
+  "#ea580c", // 3: orange
+  "#d97706", // 4: amber
+  "#16a34a", // 5: green
+  "#0891b2", // 6: cyan
+  "#2563eb", // 7: blue
+  "#7c3aed", // 8: purple
+  "#db2777", // 9: pink
+  "#f87171", // 10: light red
+  "#fb923c", // 11: light orange
+  "#fbbf24", // 12: yellow
+  "#4ade80", // 13: light green
+  "#38bdf8", // 14: sky blue
+  "#a78bfa", // 15: lavender
 ];
 
 // ─── Nibble helpers ────────────────────────────────────────────────────────────
 
 function getColor(boxes: number[], arrayIdx: number): number {
   const byte = boxes[Math.floor(arrayIdx / 2)] || 0;
-  return arrayIdx % 2 === 0 ? (byte & 0x0f) : (byte >> 4) & 0x0f;
+  return arrayIdx % 2 === 0 ? byte & 0x0f : (byte >> 4) & 0x0f;
 }
 
 function countColored(boxes: number[]): number {
@@ -76,25 +76,29 @@ function countColored(boxes: number[]): number {
 
 export default function App() {
   // ── Data state ──────────────────────────────────────────────────────────
-  const [boxesMap, setBoxesMap] = createSignal(
-    new Map<number, number[]>(),
-    { equals: false },
-  );
+  const [boxesMap, setBoxesMap] = createSignal(new Map<number, number[]>(), {
+    equals: false,
+  });
 
   const [numCheckedBoxes, setNumCheckedBoxes] = createSignal(0);
   const docColorCounts = new Map<number, number>();
 
   // ── Async subscription + canvas readiness ─────────────────────────────
   let resolveSubscription!: () => void;
-  const subscriptionPromise = new Promise<void>(res => { resolveSubscription = res; });
+  const subscriptionPromise = new Promise<void>((res) => {
+    resolveSubscription = res;
+  });
 
   const [containerMeasured, setContainerMeasured] = createSignal(false);
 
   const gridReady = createMemo(async () => {
     await subscriptionPromise;
-    await new Promise<void>(res => {
+    await new Promise<void>((res) => {
       const check = () => {
-        if (containerMeasured()) { res(); return; }
+        if (containerMeasured()) {
+          res();
+          return;
+        }
         requestAnimationFrame(check);
       };
       check();
@@ -104,6 +108,7 @@ export default function App() {
 
   const isSyncing = () => isPending(() => gridReady());
 
+
   // ── Pending optimistic writes ─────────────────────────────────────────
   const [pendingUpdates, setPendingUpdates] = createSignal(
     new Map<number, Map<number, number>>(),
@@ -112,7 +117,9 @@ export default function App() {
   // ── Round-trip timing ─────────────────────────────────────────────────
   const inflightDocs = new Map<number, { time: number; count: number }>();
   const [pendingToggleCount, setPendingToggleCount] = createSignal(0);
-  const [lastRoundTripMs, setLastRoundTripMs] = createSignal<number | null>(null);
+  const [lastRoundTripMs, setLastRoundTripMs] = createSignal<number | null>(
+    null,
+  );
   let roundTripFadeTimer = 0;
 
   // ── UI state ──────────────────────────────────────────────────────────
@@ -146,14 +153,17 @@ export default function App() {
     // SpacetimeDB event handlers
     const upsertRow = (row: Checkboxes) => {
       const boxes = Array.from(row.boxes);
-      setBoxesMap(map => { map.set(row.idx, boxes); return map; });
+      setBoxesMap((map) => {
+        map.set(row.idx, boxes);
+        return map;
+      });
 
       const newCount = countColored(boxes);
       const oldCount = docColorCounts.get(row.idx) ?? 0;
       docColorCounts.set(row.idx, newCount);
-      setNumCheckedBoxes(prev => prev + newCount - oldCount);
+      setNumCheckedBoxes((prev) => prev + newCount - oldCount);
 
-      setPendingUpdates(prev => {
+      setPendingUpdates((prev) => {
         if (!prev.has(row.idx)) return prev;
         const next = new Map(prev);
         next.delete(row.idx);
@@ -165,31 +175,43 @@ export default function App() {
         inflightDocs.delete(row.idx);
         const ms = Math.round(performance.now() - inflight.time);
         setLastRoundTripMs(ms);
-        setPendingToggleCount(c => Math.max(0, c - inflight.count));
+        setPendingToggleCount((c) => Math.max(0, c - inflight.count));
 
         clearTimeout(roundTripFadeTimer);
-        roundTripFadeTimer = window.setTimeout(() => setLastRoundTripMs(null), 2000);
+        roundTripFadeTimer = window.setTimeout(
+          () => setLastRoundTripMs(null),
+          2000,
+        );
       }
     };
 
-    conn.db.checkboxes.onInsert((_ctx: EventContext, row: Checkboxes) => upsertRow(row));
-    conn.db.checkboxes.onUpdate((_ctx: EventContext, _old: Checkboxes, row: Checkboxes) => upsertRow(row));
+    conn.db.checkboxes.onInsert((_ctx: EventContext, row: Checkboxes) =>
+      upsertRow(row),
+    );
+    conn.db.checkboxes.onUpdate(
+      (_ctx: EventContext, _old: Checkboxes, row: Checkboxes) => upsertRow(row),
+    );
 
     conn.db.checkboxes.onDelete((_ctx: EventContext, row: Checkboxes) => {
-      setBoxesMap(map => { map.delete(row.idx); return map; });
+      setBoxesMap((map) => {
+        map.delete(row.idx);
+        return map;
+      });
       const oldCount = docColorCounts.get(row.idx) ?? 0;
       docColorCounts.delete(row.idx);
-      setNumCheckedBoxes(prev => prev - oldCount);
+      setNumCheckedBoxes((prev) => prev - oldCount);
     });
 
     conn
       .subscriptionBuilder()
       .onApplied(() => resolveSubscription())
-      .subscribe(['SELECT * FROM checkboxes']);
+      .subscribe(["SELECT * FROM checkboxes"]);
   });
 
   // ── Derived scroll values ─────────────────────────────────────────────
-  const numColumns = () => Math.max(1, Math.floor(size().width / CELL_SIZE));
+  const [scrollbarWidth, setScrollbarWidth] = createSignal(0);
+  const numColumns = () =>
+    Math.max(1, Math.floor((size().width - scrollbarWidth()) / CELL_SIZE));
   const numRows = () => Math.ceil(NUM_BOXES / numColumns());
   const totalHeight = () => numRows() * CELL_SIZE;
 
@@ -228,6 +250,7 @@ export default function App() {
     rafId = requestAnimationFrame(() => {
       if (!scrollRef) return;
       setScrollTop(scrollRef.scrollTop);
+      setScrollbarWidth(scrollRef.offsetWidth - scrollRef.clientWidth);
     });
   };
 
@@ -247,9 +270,11 @@ export default function App() {
 
     const currentColor = getCellColor(documentIdx, arrayIdx);
     const newColor =
-      currentColor === selectedColor() && selectedColor() !== 0 ? 0 : selectedColor();
+      currentColor === selectedColor() && selectedColor() !== 0
+        ? 0
+        : selectedColor();
 
-    setPendingUpdates(prev => {
+    setPendingUpdates((prev) => {
       const next = new Map(prev);
       const docMap = new Map(next.get(documentIdx) ?? []);
       docMap.set(arrayIdx, newColor);
@@ -262,7 +287,7 @@ export default function App() {
       time: existing?.time ?? performance.now(),
       count: (existing?.count ?? 0) + 1,
     });
-    setPendingToggleCount(c => c + 1);
+    setPendingToggleCount((c) => c + 1);
 
     conn.reducers.toggle({ documentIdx, arrayIdx, color: newColor });
   };
@@ -274,80 +299,97 @@ export default function App() {
   return (
     <div
       style={{
-        display: 'flex',
-        'flex-direction': 'column',
-        height: '100vh',
-        width: '100vw',
-        'box-sizing': 'border-box',
-        overflow: 'hidden',
-        'font-family': 'system-ui, sans-serif',
+        display: "flex",
+        "flex-direction": "column",
+        height: "100vh",
+        width: "100vw",
+        "box-sizing": "border-box",
+        overflow: "hidden",
+        "font-family": "system-ui, sans-serif",
       }}
     >
       {/* ── Header ── */}
       <div
         style={{
-          display: 'flex',
-          'justify-content': 'space-between',
-          'align-items': 'center',
-          padding: '8px 12px',
-          'border-bottom': '1px solid #e5e7eb',
-          background: '#fff',
-          'flex-shrink': '0',
-          gap: '12px',
-          'flex-wrap': 'wrap',
+          display: "flex",
+          "justify-content": "space-between",
+          "align-items": "center",
+          padding: "8px 12px",
+          "border-bottom": "1px solid #e5e7eb",
+          background: "#fff",
+          "flex-shrink": "0",
+          gap: "12px",
+          "flex-wrap": "wrap",
         }}
       >
         <div>
-          <div style={{ display: 'flex', 'align-items': 'center', gap: '6px' }}>
-            <span style={{ 'font-weight': '700', 'font-size': '1rem' }}>
+          <div style={{ display: "flex", "align-items": "center", gap: "6px" }}>
+            <span style={{ "font-weight": "700", "font-size": "1rem" }}>
               One Billion Checkboxes
             </span>
             <Show when={isSyncing()}>
               <span
                 aria-label="Connecting…"
                 style={{
-                  display: 'inline-block',
-                  width: '10px',
-                  height: '10px',
-                  border: '2px solid #e5e7eb',
-                  'border-top-color': '#6b7280',
-                  'border-radius': '50%',
-                  animation: 'spin 0.75s linear infinite',
-                  'flex-shrink': '0',
+                  display: "inline-block",
+                  width: "10px",
+                  height: "10px",
+                  border: "2px solid #e5e7eb",
+                  "border-top-color": "#6b7280",
+                  "border-radius": "50%",
+                  animation: "spin 0.75s linear infinite",
+                  "flex-shrink": "0",
                 }}
               />
             </Show>
             {/* Toggle round-trip indicator */}
-            <span style={{
-              display: 'inline-flex',
-              'align-items': 'center',
-              'justify-content': 'center',
-              'min-width': '38px',
-              'font-size': '0.7rem',
-              'font-variant-numeric': 'tabular-nums',
-              opacity: !isSyncing() && (pendingToggleCount() > 0 || lastRoundTripMs() !== null) ? '1' : '0',
-              transition: 'opacity 0.2s ease-out',
-            }}>
-              <Show when={pendingToggleCount() > 0} fallback={
-                <span style={{ color: '#16a34a' }}>{lastRoundTripMs()}ms</span>
-              }>
+            <span
+              style={{
+                display: "inline-flex",
+                "align-items": "center",
+                "justify-content": "center",
+                "min-width": "38px",
+                "font-size": "0.7rem",
+                "font-variant-numeric": "tabular-nums",
+                opacity:
+                  !isSyncing() &&
+                  (pendingToggleCount() > 0 || lastRoundTripMs() !== null)
+                    ? "1"
+                    : "0",
+                transition: "opacity 0.2s ease-out",
+              }}
+            >
+              <Show
+                when={pendingToggleCount() > 0}
+                fallback={
+                  <span style={{ color: "#16a34a" }}>
+                    {lastRoundTripMs()}ms
+                  </span>
+                }
+              >
                 <span
                   style={{
-                    display: 'inline-block',
-                    width: '8px',
-                    height: '8px',
-                    border: '1.5px solid #e5e7eb',
-                    'border-top-color': '#9ca3af',
-                    'border-radius': '50%',
-                    animation: 'spin 0.6s linear infinite',
+                    display: "inline-block",
+                    width: "8px",
+                    height: "8px",
+                    border: "1.5px solid #e5e7eb",
+                    "border-top-color": "#9ca3af",
+                    "border-radius": "50%",
+                    animation: "spin 0.6s linear infinite",
                   }}
                 />
               </Show>
             </span>
           </div>
-          <div style={{ color: '#6b7280', 'font-size': '0.8rem', 'margin-top': '2px' }}>
+          <div
+            style={{
+              color: "#6b7280",
+              "font-size": "0.8rem",
+              "margin-top": "2px",
+            }}
+          >
             {isSyncing()
-              ? 'Connecting…'
+              ? "Connecting…"
               : `${numCheckedBoxes().toLocaleString()} colored`}
           </div>
         </div>
@@ -355,48 +397,58 @@ export default function App() {
         {/* Color palette */}
         <div
           style={{
-            display: 'flex',
-            'align-items': 'center',
-            gap: '6px',
-            'flex-wrap': 'wrap',
+            display: "flex",
+            "align-items": "center",
+            gap: "6px",
+            "flex-wrap": "wrap",
           }}
         >
-          <span style={{ 'font-size': '0.75rem', color: '#9ca3af' }}>Color:</span>
-          <div style={{ display: 'flex', gap: '3px', 'flex-wrap': 'wrap' }}>
+          <span style={{ "font-size": "0.75rem", color: "#9ca3af" }}>
+            Color:
+          </span>
+          <div style={{ display: "flex", gap: "3px", "flex-wrap": "wrap" }}>
             <For each={PALETTE} keyed={false}>
               {(colorAccessor, i) => (
                 <button
-                  onClick={() => setSelectedColor(i())}
-                  title={i() === 0 ? 'Clear (uncheck)' : `Color ${i()}`}
+                  onClick={(e) => {
+                    setSelectedColor(i());
+                  }}
+                  title={i() === 0 ? "Clear (uncheck)" : `Color ${i()}`}
                   style={{
-                    width: '20px',
-                    height: '20px',
-                    'background-color': i() === 0 ? '#fff' : colorAccessor(),
+                    width: "20px",
+                    height: "20px",
+                    "background-color": i() === 0 ? "#fff" : colorAccessor(),
                     border:
                       selectedColor() === i()
-                        ? '2px solid #1f2937'
-                        : '1px solid #d1d5db',
-                    'border-radius': '3px',
-                    cursor: 'pointer',
-                    padding: '0',
-                    'font-size': '9px',
-                    color: '#374151',
-                    display: 'flex',
-                    'align-items': 'center',
-                    'justify-content': 'center',
-                    'flex-shrink': '0',
+                        ? "2px solid #1f2937"
+                        : "1px solid #d1d5db",
+                    "border-radius": "3px",
+                    cursor: "pointer",
+                    padding: "0",
+                    "font-size": "9px",
+                    color: "#374151",
+                    display: "flex",
+                    "align-items": "center",
+                    "justify-content": "center",
+                    "flex-shrink": "0",
                   }}
                 >
-                  {i() === 0 ? '✕' : ''}
+                  {i() === 0 ? "✕" : ""}
                 </button>
               )}
             </For>
           </div>
         </div>
 
-        <div style={{ 'font-size': '0.75rem', color: '#9ca3af', 'text-align': 'right' }}>
+        <div
+          style={{
+            "font-size": "0.75rem",
+            color: "#9ca3af",
+            "text-align": "right",
+          }}
+        >
           <a
-            style={{ 'text-decoration': 'none', color: '#6b7280' }}
+            style={{ "text-decoration": "none", color: "#6b7280" }}
             href="https://spacetimedb.com/?referral=gillkyle"
             target="_blank"
           >
@@ -408,121 +460,144 @@ export default function App() {
       {/* ── Grid container (measured by ResizeObserver) ── */}
       <div
         ref={containerRef}
-        style={{ 'flex-grow': '1', overflow: 'hidden', position: 'relative' }}
+        style={{ "flex-grow": "1", overflow: "hidden", position: "relative" }}
       >
         {/* eslint-disable-next-line @typescript-eslint/no-explicit-any */}
-        <Loading {...{ on: gridReady } as any} fallback={
-          <div style={{
-            display: 'flex',
-            'flex-direction': 'column',
-            'align-items': 'center',
-            'justify-content': 'center',
-            height: '100%',
-            gap: '10px',
-            color: '#9ca3af',
-            'font-family': 'system-ui, sans-serif',
-          }}>
-            <span style={{
-              display: 'inline-block',
-              width: '28px',
-              height: '28px',
-              border: '3px solid #e5e7eb',
-              'border-top-color': '#6b7280',
-              'border-radius': '50%',
-              animation: 'spin 0.75s linear infinite',
-            }} />
-            <span style={{ 'font-size': '0.875rem' }}>
-              {isConnected() ? 'Loading checkboxes…' : 'Connecting to SpacetimeDB…'}
-            </span>
-          </div>
-        }>
+        <Loading
+          {...({ on: gridReady } as any)}
+          fallback={
+            <div
+              style={{
+                display: "flex",
+                "flex-direction": "column",
+                "align-items": "center",
+                "justify-content": "center",
+                height: "100%",
+                gap: "10px",
+                color: "#9ca3af",
+                "font-family": "system-ui, sans-serif",
+              }}
+            >
+              <span
+                style={{
+                  display: "inline-block",
+                  width: "28px",
+                  height: "28px",
+                  border: "3px solid #e5e7eb",
+                  "border-top-color": "#6b7280",
+                  "border-radius": "50%",
+                  animation: "spin 0.75s linear infinite",
+                }}
+              />
+              <span style={{ "font-size": "0.875rem" }}>
+                {isConnected()
+                  ? "Loading checkboxes…"
+                  : "Connecting to SpacetimeDB…"}
+              </span>
+            </div>
+          }
+        >
           <Show when={gridReady()}>
-          {/* Scroll container with spacer for native scrollbar */}
-          <div
-            ref={(el: HTMLDivElement) => { scrollRef = el; }}
-            style={{ width: '100%', height: '100%', overflow: 'auto' }}
-            onScroll={onScroll}
-          >
-            {/* Spacer sets the full virtual height for scrollbar sizing */}
-            <div style={{
-              height: `${totalHeight()}px`,
-              width: `${numColumns() * CELL_SIZE}px`,
-              position: 'relative',
-            }}>
-              {/*
+            {/* Scroll container with spacer for native scrollbar */}
+            <div
+              ref={(el: HTMLDivElement) => {
+                scrollRef = el;
+                requestAnimationFrame(() => {
+                  setScrollbarWidth(el.offsetWidth - el.clientWidth);
+                });
+              }}
+              style={{ width: "100%", height: "100%", overflow: "auto" }}
+              onScroll={onScroll}
+            >
+              {/* Spacer sets the full virtual height for scrollbar sizing */}
+              <div
+                style={{
+                  height: `${totalHeight()}px`,
+                  width: `${numColumns() * CELL_SIZE}px`,
+                  position: "relative",
+                  margin: "0 auto",
+                }}
+              >
+                {/*
                 Fixed pool of DOM elements positioned via translateY.
                 On scroll, startRow changes → each cell's index updates →
                 SolidJS only touches DOM nodes whose color actually changed.
               */}
-              <div style={{
-                position: 'absolute',
-                top: '0',
-                left: '0',
-                width: '100%',
-                transform: `translateY(${startRow() * CELL_SIZE}px)`,
-                'will-change': 'transform',
-              }}>
-                <For each={rowPool()} keyed={false}>
-                  {(localRow) => {
-                    const rowIdx = () => startRow() + localRow();
-                    return (
-                      <div style={{ display: 'flex', height: `${CELL_SIZE}px` }}>
-                        <For each={colPool()} keyed={false}>
-                          {(col) => {
-                            const globalIndex = () => rowIdx() * numColumns() + col();
-                            const documentIdx = () => globalIndex() % NUM_DOCUMENTS;
-                            const arrayIdx = () => Math.floor(globalIndex() / NUM_DOCUMENTS);
-                            const colorVal = () => {
-                              if (globalIndex() >= NUM_BOXES) return -1; // out of range
-                              return getCellColor(documentIdx(), arrayIdx());
-                            };
-                            const isColored = () => colorVal() > 0;
-                            const isVisible = () => colorVal() >= 0;
+                <div
+                  style={{
+                    position: "absolute",
+                    top: "0",
+                    left: "0",
+                    width: "100%",
+                    transform: `translateY(${startRow() * CELL_SIZE}px)`,
+                    "will-change": "transform",
+                  }}
+                >
+                  <For each={rowPool()} keyed={false}>
+                    {(localRow) => {
+                      const rowIdx = () => startRow() + localRow();
+                      return (
+                        <div
+                          style={{ display: "flex", height: `${CELL_SIZE}px` }}
+                        >
+                          <For each={colPool()} keyed={false}>
+                            {(col) => {
+                              const globalIndex = () =>
+                                rowIdx() * numColumns() + col();
+                              const documentIdx = () =>
+                                globalIndex() % NUM_DOCUMENTS;
+                              const arrayIdx = () =>
+                                Math.floor(globalIndex() / NUM_DOCUMENTS);
+                              const colorVal = () => {
+                                if (globalIndex() >= NUM_BOXES) return -1; // out of range
+                                return getCellColor(documentIdx(), arrayIdx());
+                              };
+                              const isColored = () => colorVal() > 0;
+                              const isVisible = () => colorVal() >= 0;
 
-                            return (
-                              <div
-                                style={{
-                                  width: `${CELL_SIZE}px`,
-                                  height: `${CELL_SIZE}px`,
-                                  padding: '1px',
-                                  visibility: isVisible() ? 'visible' : 'hidden',
-                                }}
-                              >
+                              return (
                                 <div
-                                  onClick={() => {
-                                    if (!isVisible() || loading()) return;
-                                    toggle(documentIdx(), arrayIdx());
-                                  }}
                                   style={{
-                                    width: `${CELL_SIZE - 2}px`,
-                                    height: `${CELL_SIZE - 2}px`,
-                                    'background-color': isColored() ? PALETTE[colorVal()] : '#fff',
-                                    border: `1px solid ${isColored() ? PALETTE[colorVal()] : '#e5e7eb'}`,
-                                    'border-radius': '3px',
-                                    'box-sizing': 'border-box',
-                                    cursor: loading() ? 'default' : 'pointer',
-                                    transition: 'background-color 0.1s ease-out, border-color 0.1s ease-out',
-                                    display: 'flex',
-                                    'align-items': 'center',
-                                    'justify-content': 'center',
-                                    'font-size': '12px',
-                                    'line-height': '1',
-                                    color: '#fff',
+                                    width: `${CELL_SIZE}px`,
+                                    height: `${CELL_SIZE}px`,
+                                    padding: "1px",
+                                    visibility: isVisible()
+                                      ? "visible"
+                                      : "hidden",
                                   }}
                                 >
-                                  {isColored() ? '✓' : ''}
+                                  <div
+                                    class={
+                                      isColored() ? "cell cell-filled" : "cell"
+                                    }
+                                    onClick={() => {
+                                      if (!isVisible() || loading()) return;
+                                      toggle(documentIdx(), arrayIdx());
+                                    }}
+                                    style={{
+                                      width: `${CELL_SIZE - 2}px`,
+                                      height: `${CELL_SIZE - 2}px`,
+                                      "background-color": isColored()
+                                        ? PALETTE[colorVal()]
+                                        : "#fff",
+                                      border: `1px solid ${isColored() ? PALETTE[colorVal()] : "#e5e7eb"}`,
+                                      cursor: loading() ? "default" : "pointer",
+                                      color: "#fff",
+                                    }}
+                                  >
+                                    {isColored() ? "✓" : ""}
+                                  </div>
                                 </div>
-                              </div>
-                            );
-                          }}
-                        </For>
-                      </div>
-                    );
-                  }}
-                </For>
+                              );
+                            }}
+                          </For>
+                        </div>
+                      );
+                    }}
+                  </For>
+                </div>
               </div>
             </div>
-          </div>
           </Show>
         </Loading>
       </div>
