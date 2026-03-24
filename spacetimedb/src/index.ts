@@ -265,6 +265,23 @@ export const toggle = spacetimedb.reducer(
   }
 );
 
+/** Bulk import a document row. Owner only — used for data migration. */
+export const import_boxes = spacetimedb.reducer(
+  { idx: t.u32(), boxes: t.byteArray() },
+  (ctx, { idx, boxes }) => {
+    if (!ctx.sender.isEqual(OWNER)) throw new SenderError('Unauthorized');
+    if (idx >= NUM_DOCUMENTS) throw new SenderError('Index out of range');
+    if (boxes.length !== BYTES_PER_DOCUMENT) throw new SenderError('Invalid boxes length');
+
+    const existing = ctx.db.checkboxes.idx.find(idx);
+    if (existing) {
+      ctx.db.checkboxes.idx.update({ ...existing, boxes });
+    } else {
+      ctx.db.checkboxes.insert({ idx, boxes });
+    }
+  }
+);
+
 /** Reset all checkboxes to unchecked by deleting all document rows. Owner only. */
 export const seed = spacetimedb.reducer((ctx) => {
   if (!ctx.sender.isEqual(OWNER)) throw new SenderError('Unauthorized');

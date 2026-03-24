@@ -6,11 +6,13 @@
 import { type Infer as __Infer } from "spacetimedb";
 
 // Import all reducer arg schemas
+import ImportBoxesReducer from "../import_boxes_reducer";
 import RegisterFingerprintReducer from "../register_fingerprint_reducer";
 import SeedReducer from "../seed_reducer";
 import SyncStatsReducer from "../sync_stats_reducer";
 import ToggleReducer from "../toggle_reducer";
 
+export type ImportBoxesParams = __Infer<typeof ImportBoxesReducer>;
 export type RegisterFingerprintParams = __Infer<typeof RegisterFingerprintReducer>;
 export type SeedParams = __Infer<typeof SeedReducer>;
 export type SyncStatsParams = __Infer<typeof SyncStatsReducer>;
