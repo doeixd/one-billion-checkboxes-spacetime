@@ -16,6 +16,19 @@ export const Checkboxes = __t.object("Checkboxes", {
 });
 export type Checkboxes = __Infer<typeof Checkboxes>;
 
+export const FingerprintRateLimit = __t.object("FingerprintRateLimit", {
+  fingerprint: __t.string(),
+  lastToggleAt: __t.u64(),
+  toggleCount: __t.u32(),
+});
+export type FingerprintRateLimit = __Infer<typeof FingerprintRateLimit>;
+
+export const IdentityFingerprint = __t.object("IdentityFingerprint", {
+  identity: __t.identity(),
+  fingerprint: __t.string(),
+});
+export type IdentityFingerprint = __Infer<typeof IdentityFingerprint>;
+
 export const PoisonJob = __t.object("PoisonJob", {
   scheduledId: __t.u64(),
   scheduledAt: __t.scheduleAt(),

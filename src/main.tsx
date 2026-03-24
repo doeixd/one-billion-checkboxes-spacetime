@@ -8,6 +8,7 @@
  */
 import { createSignal } from 'solid-js';
 import { render } from '@solidjs/web';
+import FingerprintJS from '@fingerprintjs/fingerprintjs';
 import App from './App.tsx';
 import { DbConnection } from './module_bindings/index.ts';
 import type { ErrorContext } from './module_bindings/index.ts';
@@ -20,9 +21,14 @@ const TOKEN_KEY = `${HOST}/${DB_NAME}/auth_token`;
 // Module-level reactive signal — updated by connection callbacks, read by App
 export const [isConnected, setIsConnected] = createSignal(false);
 
-const onConnect = (_conn: DbConnection, _identity: Identity, token: string) => {
+const onConnect = (conn: DbConnection, _identity: Identity, token: string) => {
   localStorage.setItem(TOKEN_KEY, token);
   setIsConnected(true);
+
+  // Register browser fingerprint for rate limiting (fire-and-forget)
+  FingerprintJS.load().then(fp => fp.get()).then(result => {
+    conn.reducers.registerFingerprint({ fingerprint: result.visitorId });
+  });
 };
 
 const onDisconnect = () => {

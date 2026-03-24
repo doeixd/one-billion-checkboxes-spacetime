@@ -128,6 +128,21 @@ const spacetimedb = schema({
       toggleCount: t.u32(),  // toggles in current window
     }
   ),
+  identityFingerprint: table(
+    { name: 'identity_fingerprint' },
+    {
+      identity: t.identity().primaryKey(),
+      fingerprint: t.string(),
+    }
+  ),
+  fingerprintRateLimit: table(
+    { name: 'fingerprint_rate_limit' },
+    {
+      fingerprint: t.string().primaryKey(),
+      lastToggleAt: t.u64(),
+      toggleCount: t.u32(),
+    }
+  ),
   poisonJob: PoisonJob,
   syncStatsJob: SyncStatsJob,
 });
@@ -151,36 +166,50 @@ function incrementStats(ctx: any, delta: 1 | -1) {
 const RATE_LIMIT_WINDOW_US = 1_000_000n; // 1 second in microseconds
 const RATE_LIMIT_MAX_TOGGLES = 20;      // max toggles per window
 
-/** Check and enforce rate limit. Throws if client is too fast. */
-function checkRateLimit(ctx: any) {
-  const now = ctx.timestamp.microsSinceUnixEpoch;
-  const existing = ctx.db.rateLimit.identity.find(ctx.sender);
-
+/** Enforce a sliding-window rate limit on a single table. Returns true if allowed. */
+function enforceWindowLimit(
+  table: any,
+  key: any,
+  now: bigint,
+  findFn: () => any,
+  insertFn: () => void,
+): void {
+  const existing = findFn();
   if (existing) {
     const elapsed = now - existing.lastToggleAt;
     if (elapsed < RATE_LIMIT_WINDOW_US) {
-      // Still in the same window
       if (existing.toggleCount >= RATE_LIMIT_MAX_TOGGLES) {
         throw new Error('Rate limit exceeded — slow down');
       }
-      ctx.db.rateLimit.identity.update({
-        ...existing,
-        toggleCount: existing.toggleCount + 1,
-      });
+      table.update({ ...existing, toggleCount: existing.toggleCount + 1 });
     } else {
-      // New window — reset counter
-      ctx.db.rateLimit.identity.update({
-        ...existing,
-        lastToggleAt: now,
-        toggleCount: 1,
-      });
+      table.update({ ...existing, lastToggleAt: now, toggleCount: 1 });
     }
   } else {
-    ctx.db.rateLimit.insert({
-      identity: ctx.sender,
-      lastToggleAt: now,
-      toggleCount: 1,
-    });
+    insertFn();
+  }
+}
+
+/** Check and enforce rate limit. Throws if client is too fast. */
+function checkRateLimit(ctx: any) {
+  const now = ctx.timestamp.microsSinceUnixEpoch;
+
+  // Layer 1: Per-identity rate limit
+  enforceWindowLimit(
+    ctx.db.rateLimit.identity, ctx.sender, now,
+    () => ctx.db.rateLimit.identity.find(ctx.sender),
+    () => ctx.db.rateLimit.insert({ identity: ctx.sender, lastToggleAt: now, toggleCount: 1 }),
+  );
+
+  // Layer 2: Per-fingerprint rate limit (shared across all identities with same fingerprint)
+  const fpMapping = ctx.db.identityFingerprint.identity.find(ctx.sender);
+  if (fpMapping) {
+    const fp = fpMapping.fingerprint;
+    enforceWindowLimit(
+      ctx.db.fingerprintRateLimit.fingerprint, fp, now,
+      () => ctx.db.fingerprintRateLimit.fingerprint.find(fp),
+      () => ctx.db.fingerprintRateLimit.insert({ fingerprint: fp, lastToggleAt: now, toggleCount: 1 }),
+    );
   }
 }
 
@@ -201,6 +230,22 @@ function recalcStats(ctx: any) {
 }
 
 // --- Reducers ---
+
+/** Register a browser fingerprint for the calling identity. Called once per session. */
+export const register_fingerprint = spacetimedb.reducer(
+  { fingerprint: t.string() },
+  (ctx, { fingerprint }) => {
+    if (!/^[a-f0-9]{32}$/.test(fingerprint)) {
+      throw new SenderError('Invalid fingerprint format');
+    }
+    const existing = ctx.db.identityFingerprint.identity.find(ctx.sender);
+    if (existing) {
+      ctx.db.identityFingerprint.identity.update({ ...existing, fingerprint });
+    } else {
+      ctx.db.identityFingerprint.insert({ identity: ctx.sender, fingerprint });
+    }
+  }
+);
 
 /**
  * Set the color of a single checkbox. Called from the client on click.
