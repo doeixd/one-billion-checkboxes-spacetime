@@ -57,7 +57,7 @@ const PALETTE: string[] = [
 
 // ─── Nibble helpers ────────────────────────────────────────────────────────────
 
-function getColor(boxes: number[], arrayIdx: number): number {
+function getColor(boxes: ArrayLike<number>, arrayIdx: number): number {
   const byte = boxes[Math.floor(arrayIdx / 2)] || 0;
   return arrayIdx % 2 === 0 ? byte & 0x0f : (byte >> 4) & 0x0f;
 }
@@ -66,11 +66,12 @@ function getColor(boxes: number[], arrayIdx: number): number {
 
 export default function App() {
   // ── Data state ──────────────────────────────────────────────────────────
-  const [boxesMap, setBoxesMap] = createSignal(new Map<number, number[]>(), {
+  const [boxesMap, setBoxesMap] = createSignal(new Map<number, Uint8Array>(), {
     equals: false,
   });
 
   const [totalColored, setTotalColored] = createSignal(0n);
+  const [pendingCountDelta, setPendingCountDelta] = createSignal(0);
 
   // ── Async subscription + grid readiness ──────────────────────────────
   let resolveSubscription!: () => void;
@@ -141,9 +142,8 @@ export default function App() {
 
     // SpacetimeDB event handlers — checkboxes
     const upsertRow = (row: Checkboxes) => {
-      const boxes = Array.from(row.boxes);
       setBoxesMap((map) => {
-        map.set(row.idx, boxes);
+        map.set(row.idx, row.boxes);
         return map;
       });
 
@@ -197,7 +197,10 @@ export default function App() {
     });
 
     // SpacetimeDB event handlers — stats (global colored count)
-    const upsertStats = (row: Stats) => setTotalColored(row.totalColored);
+    const upsertStats = (row: Stats) => {
+      setTotalColored(row.totalColored);
+      setPendingCountDelta(0); // server ground truth resets optimistic delta
+    };
     conn.db.stats.onInsert((_ctx: EventContext, row: Stats) => upsertStats(row));
     conn.db.stats.onUpdate((_ctx: EventContext, _old: Stats, row: Stats) => upsertStats(row));
 
@@ -325,7 +328,7 @@ export default function App() {
   // ── Side effects ──────────────────────────────────────────────────────
 
   createEffect(
-    () => Number(totalColored()),
+    () => Number(totalColored()) + pendingCountDelta(),
     (count) => {
       document.title = `${count.toLocaleString()} colored — One Billion Checkboxes`;
     },
@@ -360,6 +363,13 @@ export default function App() {
       currentColor === selectedColor() && selectedColor() !== 0
         ? 0
         : selectedColor();
+
+    // Optimistic count adjustment
+    const wasColored = currentColor > 0;
+    const isColored = newColor > 0;
+    if (wasColored !== isColored) {
+      setPendingCountDelta((d) => d + (isColored ? 1 : -1));
+    }
 
     setPendingUpdates((prev) => {
       const next = new Map(prev);
@@ -477,7 +487,7 @@ export default function App() {
           >
             {isSyncing()
               ? "Connecting…"
-              : `${Number(totalColored()).toLocaleString()} colored`}
+              : `${(Number(totalColored()) + pendingCountDelta()).toLocaleString()} colored`}
           </div>
         </div>
 

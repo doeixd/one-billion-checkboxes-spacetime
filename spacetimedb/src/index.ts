@@ -26,15 +26,15 @@ const BYTES_PER_DOCUMENT = BOXES_PER_DOCUMENT / 2; // 2000 (4 bits per box, 2 ni
 // --- Nibble manipulation helpers ---
 
 /** Returns a zero-filled byte array representing 4,000 unchecked/uncolored boxes. */
-function emptyBoxes(): number[] {
-  return new Array(BYTES_PER_DOCUMENT).fill(0);
+function emptyBoxes(): Uint8Array {
+  return new Uint8Array(BYTES_PER_DOCUMENT);
 }
 
 /**
  * Reads the 4-bit nibble color value for checkbox `arrayIdx` from the byte array.
  * Returns 0 (unchecked) through 15 (color index).
  */
-function getColor(boxes: number[], arrayIdx: number): number {
+function getColor(boxes: ArrayLike<number>, arrayIdx: number): number {
   const byteIdx = Math.floor(arrayIdx / 2);
   const byte = boxes[byteIdx] || 0;
   return arrayIdx % 2 === 0 ? (byte & 0x0F) : ((byte >> 4) & 0x0F);
@@ -44,7 +44,7 @@ function getColor(boxes: number[], arrayIdx: number): number {
  * Sets the 4-bit nibble for checkbox `arrayIdx` to `color` (0-15).
  * Mutates in place. Returns true if the value actually changed.
  */
-function setColor(boxes: number[], arrayIdx: number, color: number): boolean {
+function setColor(boxes: number[] | Uint8Array, arrayIdx: number, color: number): boolean {
   const current = getColor(boxes, arrayIdx);
   if (current === color) return false;
   const byteIdx = Math.floor(arrayIdx / 2);
@@ -109,7 +109,7 @@ const spacetimedb = schema({
     { name: 'checkboxes', public: true },
     {
       idx: t.u32().primaryKey(),
-      boxes: t.array(t.u8()),
+      boxes: t.byteArray(),
     }
   ),
   stats: table(
@@ -160,7 +160,7 @@ export const toggle = spacetimedb.reducer(
 
     const existing = ctx.db.checkboxes.idx.find(documentIdx);
     if (existing) {
-      const boxes = [...existing.boxes];
+      const boxes = new Uint8Array(existing.boxes);
       if (setColor(boxes, arrayIdx, clampedColor)) {
         ctx.db.checkboxes.idx.update({ ...existing, boxes });
       }
