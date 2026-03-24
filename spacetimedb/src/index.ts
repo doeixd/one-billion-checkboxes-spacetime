@@ -11,7 +11,7 @@
  *   A scheduled "poison" reducer runs every 10 seconds to randomly toggle 10
  *   checkboxes, keeping the board alive even when no users are interacting.
  *
- *   A scheduled "sync_stats" job runs every 30 seconds to recalculate the global
+ *   A scheduled "sync_stats" job runs every 5 seconds to recalculate the global
  *   colored-checkbox count from ground truth (full scan of all document rows).
  */
 import { schema, table, t } from 'spacetimedb/server';
@@ -191,7 +191,6 @@ function recalcStats(ctx: any) {
     total += countColored(row.boxes);
     docCount++;
   }
-  console.log(`sync_stats: ${docCount} documents, ${total} colored checkboxes`);
   const existing = ctx.db.stats.id.find(0);
   if (existing) {
     ctx.db.stats.id.update({ ...existing, totalColored: BigInt(total) });
@@ -324,10 +323,6 @@ export const init = spacetimedb.init((ctx) => {
   });
 });
 
-export const onConnect = spacetimedb.clientConnected((_ctx) => {
-  console.log('Client connected');
-});
+export const onConnect = spacetimedb.clientConnected((_ctx) => {});
 
-export const onDisconnect = spacetimedb.clientDisconnected((_ctx) => {
-  console.log('Client disconnected');
-});
+export const onDisconnect = spacetimedb.clientDisconnected((_ctx) => {});

@@ -14,7 +14,7 @@ import type { ErrorContext } from './module_bindings/index.ts';
 import { Identity } from 'spacetimedb';
 
 const HOST = import.meta.env.VITE_SPACETIMEDB_HOST ?? 'ws://localhost:3000';
-const DB_NAME = import.meta.env.VITE_SPACETIMEDB_DB_NAME ?? 'react-ts';
+const DB_NAME = import.meta.env.VITE_SPACETIMEDB_DB_NAME ?? 'one-billion-checkboxes';
 const TOKEN_KEY = `${HOST}/${DB_NAME}/auth_token`;
 
 // Module-level reactive signal — updated by connection callbacks, read by App

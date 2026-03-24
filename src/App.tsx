@@ -15,6 +15,7 @@
  */
 import {
   createSignal,
+  createStore,
   createMemo,
   createEffect,
   isPending,
@@ -66,9 +67,7 @@ function getColor(boxes: ArrayLike<number>, arrayIdx: number): number {
 
 export default function App() {
   // ── Data state ──────────────────────────────────────────────────────────
-  const [boxesMap, setBoxesMap] = createSignal(new Map<number, Uint8Array>(), {
-    equals: false,
-  });
+  const [boxesStore, setBoxesStore] = createStore<Record<number, Uint8Array>>({});
 
   const [totalColored, setTotalColored] = createSignal(0n);
   const [pendingCountDelta, setPendingCountDelta] = createSignal(0);
@@ -96,9 +95,7 @@ export default function App() {
   let subDebounceTimer = 0;
 
   // ── Pending optimistic writes ─────────────────────────────────────────
-  const [pendingUpdates, setPendingUpdates] = createSignal(
-    new Map<number, Map<number, number>>(),
-  );
+  const [pendingStore, setPendingStore] = createStore<Record<number, Record<number, number>>>({});
 
   // ── Round-trip timing ─────────────────────────────────────────────────
   const inflightDocs = new Map<number, { time: number; count: number }>();
@@ -142,17 +139,11 @@ export default function App() {
 
     // SpacetimeDB event handlers — checkboxes
     const upsertRow = (row: Checkboxes) => {
-      setBoxesMap((map) => {
-        map.set(row.idx, row.boxes);
-        return map;
-      });
+      setBoxesStore(s => { s[row.idx] = row.boxes; });
 
-      setPendingUpdates((prev) => {
-        if (!prev.has(row.idx)) return prev;
-        const next = new Map(prev);
-        next.delete(row.idx);
-        return next;
-      });
+      if (pendingStore[row.idx]) {
+        setPendingStore(s => { delete s[row.idx]; });
+      }
 
       const inflight = inflightDocs.get(row.idx);
       if (inflight) {
@@ -177,18 +168,11 @@ export default function App() {
     );
 
     conn.db.checkboxes.onDelete((_ctx: EventContext, row: Checkboxes) => {
-      setBoxesMap((map) => {
-        map.delete(row.idx);
-        return map;
-      });
+      setBoxesStore(s => { delete s[row.idx]; });
 
-      // Clean up pending/inflight state for unsubscribed docs
-      setPendingUpdates((prev) => {
-        if (!prev.has(row.idx)) return prev;
-        const next = new Map(prev);
-        next.delete(row.idx);
-        return next;
-      });
+      if (pendingStore[row.idx]) {
+        setPendingStore(s => { delete s[row.idx]; });
+      }
       const inflight = inflightDocs.get(row.idx);
       if (inflight) {
         inflightDocs.delete(row.idx);
@@ -349,9 +333,9 @@ export default function App() {
 
   /** Look up effective color for a cell (pending overlay first, then base). */
   const getCellColor = (documentIdx: number, arrayIdx: number): number => {
-    const docPending = pendingUpdates().get(documentIdx);
-    if (docPending?.has(arrayIdx)) return docPending.get(arrayIdx)!;
-    const docBoxes = boxesMap().get(documentIdx);
+    const docPending = pendingStore[documentIdx];
+    if (docPending && arrayIdx in docPending) return docPending[arrayIdx];
+    const docBoxes = boxesStore[documentIdx];
     return docBoxes ? getColor(docBoxes, arrayIdx) : 0;
   };
 
@@ -371,12 +355,9 @@ export default function App() {
       setPendingCountDelta((d) => d + (isColored ? 1 : -1));
     }
 
-    setPendingUpdates((prev) => {
-      const next = new Map(prev);
-      const docMap = new Map(next.get(documentIdx) ?? []);
-      docMap.set(arrayIdx, newColor);
-      next.set(documentIdx, docMap);
-      return next;
+    setPendingStore(s => {
+      if (!s[documentIdx]) s[documentIdx] = {};
+      s[documentIdx][arrayIdx] = newColor;
     });
 
     const existing = inflightDocs.get(documentIdx);
