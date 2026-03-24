@@ -8,9 +8,6 @@
  *   Document rows are created on first use (lazy initialization), so initial
  *   startup is instant regardless of the total checkbox count.
  *
- *   A scheduled "poison" reducer runs every 10 seconds to randomly toggle 10
- *   checkboxes, keeping the board alive even when no users are interacting.
- *
  *   A scheduled "sync_stats" job runs every 15 seconds to recalculate the global
  *   colored-checkbox count from ground truth (full scan of all document rows).
  */
@@ -68,30 +65,7 @@ function countColored(boxes: ArrayLike<number>): number {
   return count;
 }
 
-/**
- * Deterministic PRNG (reducers can't use Math.random).
- * Uses a multiplicative hash to derive a pseudo-random u32 from (seed, i).
- */
-function pseudoRandom(seed: number, i: number): number {
-  let h = (seed + i * 374761393) | 0;
-  h = Math.imul(h ^ (h >>> 13), 1274126177);
-  h = h ^ (h >>> 16);
-  return h >>> 0;
-}
-
 // --- Tables ---
-
-/**
- * Scheduled table for the "poison the well" recurring job.
- */
-// eslint-disable-next-line @typescript-eslint/no-explicit-any
-const PoisonJob = table({
-  name: 'poison_job',
-  scheduled: (): any => run_poison,
-}, {
-  scheduledId: t.u64().primaryKey().autoInc(),
-  scheduledAt: t.scheduleAt(),
-});
 
 /**
  * Scheduled table for the periodic stats sync job.
@@ -143,7 +117,6 @@ const spacetimedb = schema({
       toggleCount: t.u32(),
     }
   ),
-  poisonJob: PoisonJob,
   syncStatsJob: SyncStatsJob,
 });
 export default spacetimedb;
@@ -294,42 +267,6 @@ export const seed = spacetimedb.reducer((ctx) => {
   }
 });
 
-/**
- * "Poison the well" — scheduled reducer that randomly colors/uncolors 10 checkboxes
- * then re-schedules itself 10 seconds later.
- */
-export const run_poison = spacetimedb.reducer(
-  { arg: PoisonJob.rowType },
-  (ctx, { arg: _arg }) => {
-    const prngSeed = Number(ctx.timestamp.microsSinceUnixEpoch % BigInt(Number.MAX_SAFE_INTEGER));
-
-    for (let i = 0; i < 10; i++) {
-      const val = pseudoRandom(prngSeed, i);
-      const documentIdx = val % NUM_DOCUMENTS;
-      const arrayIdx = (val >>> 8) % BOXES_PER_DOCUMENT;
-      const color = (val >>> 16) % 16;
-
-      const row = ctx.db.checkboxes.idx.find(documentIdx);
-      if (row) {
-        const boxes = new Uint8Array(row.boxes);
-        if (setColor(boxes, arrayIdx, color)) {
-          ctx.db.checkboxes.idx.update({ ...row, boxes });
-        }
-      } else if (color > 0) {
-        const boxes = emptyBoxes();
-        setColor(boxes, arrayIdx, color);
-        ctx.db.checkboxes.insert({ idx: documentIdx, boxes });
-      }
-    }
-
-    const futureTime = ctx.timestamp.microsSinceUnixEpoch + 10_000_000n;
-    ctx.db.poisonJob.insert({
-      scheduledId: 0n,
-      scheduledAt: ScheduleAt.time(futureTime),
-    });
-  }
-);
-
 /** Scheduled reducer: recalculate stats from ground truth, then reschedule. */
 export const run_sync_stats = spacetimedb.reducer(
   { arg: SyncStatsJob.rowType },
@@ -357,14 +294,7 @@ export const init = spacetimedb.init((ctx) => {
   // Sync stats from existing data
   recalcStats(ctx);
 
-  // Schedule poison job (10s interval)
-  const poisonTime = ctx.timestamp.microsSinceUnixEpoch + 10_000_000n;
-  ctx.db.poisonJob.insert({
-    scheduledId: 0n,
-    scheduledAt: ScheduleAt.time(poisonTime),
-  });
-
-  // Schedule stats sync job (5s interval)
+  // Schedule stats sync job (15s interval)
   const syncTime = ctx.timestamp.microsSinceUnixEpoch + 15_000_000n;
   ctx.db.syncStatsJob.insert({
     scheduledId: 0n,
