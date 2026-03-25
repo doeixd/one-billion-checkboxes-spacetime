@@ -718,14 +718,16 @@ export const run_gol_tick = spacetimedb.reducer(
     const gen = meta.generation + 1n;
     ctx.db.golMeta.id.update({ ...meta, generation: gen });
 
-    // 7b. Update loop detection status.
+    // 7b. Update loop detection status (only surface loops with period > 2;
+    //     period 1 = static and period 2 = blinkers are normal GOL behavior).
+    const reportedPeriod = loopPeriod > 2 ? loopPeriod : 0;
     const loopRow = ctx.db.golLoopStatus.id.find(0);
     if (loopRow) {
-      if (loopRow.loopPeriod !== loopPeriod) {
-        ctx.db.golLoopStatus.id.update({ id: 0, loopPeriod });
+      if (loopRow.loopPeriod !== reportedPeriod) {
+        ctx.db.golLoopStatus.id.update({ id: 0, loopPeriod: reportedPeriod });
       }
     } else {
-      ctx.db.golLoopStatus.insert({ id: 0, loopPeriod });
+      ctx.db.golLoopStatus.insert({ id: 0, loopPeriod: reportedPeriod });
     }
 
     // 8. Periodically sync row chunks for new-client snapshots.
@@ -743,9 +745,10 @@ export const run_gol_tick = spacetimedb.reducer(
       }
     }
 
-    // 9. Adaptive reschedule: pause on loop/stable, full speed otherwise.
-    const isActive = diffLen > 0 && loopPeriod === 0;
-    const interval = isActive ? GOL_TICK_INTERVAL_US : GOL_TICK_INTERVAL_IDLE_US;
+    // 9. Adaptive reschedule: slow down only for higher-order loops (period > 2).
+    //    Period 1 (static) and 2 (blinkers etc.) are normal GOL behavior.
+    const isIdle = diffLen === 0 || loopPeriod > 2;
+    const interval = isIdle ? GOL_TICK_INTERVAL_IDLE_US : GOL_TICK_INTERVAL_US;
     ctx.db.golTickJob.insert({
       scheduledId: 0n,
       scheduledAt: ScheduleAt.time(ctx.timestamp.microsSinceUnixEpoch + interval),

@@ -234,8 +234,7 @@ export default function GameOfLife() {
               color: "#d97706",
               "font-weight": "600",
             }}>
-              {loopPeriod() === 1 ? "Static" : `Loop (period ${loopPeriod()})`}
-              {" — tap the board to resume"}
+              {`Loop (period ${loopPeriod()}) — tap the board to resume`}
             </span>
           </Show>
         </div>
