@@ -21,7 +21,7 @@ The answer to both is yes, with some careful architecture.
 ┌─────────────────────────────┐         ┌──────────────────────────────┐
 │   SolidJS 2.0 Frontend      │ ←────── │   SpacetimeDB Module         │
 │                              │  subs   │                              │
-│  Scaled virtual scroll (50M) │ ──────→ │  250K rows × 2KB each       │
+│  Scaled virtual scroll (30M) │ ──────→ │  250K rows × 2KB each       │
 │  Fine-grained cell reactivity│ reducer │  Nibble-packed (4 bits/cell) │
 │  Two-phase subscriptions     │  calls  │  Change events (~24B each)   │
 │  Optimistic UI + rate limit  │         │  Scheduled jobs (stats, GOL) │
@@ -125,7 +125,7 @@ The `stats` table (one row, always subscribed) holds `totalColored`. It's recalc
 
 1 billion checkboxes at 22px each would be a 484km tall page — far beyond any browser's maximum scrollable height (~33M pixels in Chrome). Instead, a **fixed pool** of ~300 DOM elements covers the viewport + 3 rows of overscan.
 
-The virtual spacer's height is capped at 50M pixels, with a **scroll scale factor** mapping physical scroll position to logical row position proportionally. This lets the scrollbar smoothly address all ~12.5M rows despite the browser limit. A URL-synced **offset input** (`#n`) provides pixel-perfect navigation to any of the 1 billion cells — type a number, press Enter, and the grid jumps directly there.
+The virtual spacer's height is capped at 30M pixels, with a **scroll scale factor** mapping physical scroll position to logical row position proportionally. This lets the scrollbar smoothly address all ~12.5M rows despite the browser limit. A URL-synced **offset input** (`#n`) provides pixel-perfect navigation to any of the 1 billion cells — type a number, press Enter, and the grid jumps directly there.
 
 ### `<For keyed={false}>` — Index-Based DOM Reuse
 

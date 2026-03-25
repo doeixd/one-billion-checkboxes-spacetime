@@ -37,7 +37,7 @@ const NUM_BOXES = 1_000_000_000;
 const NUM_DOCUMENTS = 250_000;
 const CELL_SIZE = 22; // px
 const OVERSCAN = 3; // extra rows above/below viewport
-const MAX_SCROLL_HEIGHT = 50_000_000; // px
+const MAX_SCROLL_HEIGHT = 30_000_000; // px — under Chrome's ~33.5M cap
 
 const PALETTE: string[] = [
   "#f3f4f6", // 0: clear / uncheck
