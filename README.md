@@ -4,7 +4,7 @@ A real-time collaborative app with **one billion checkboxes** and a **multiplaye
 
 **Live at [one-billion-checkboxes-spacetime.vercel.app](https://one-billion-checkboxes-spacetime.vercel.app/)**
 
-Inspired by the original [One Million Checkboxes](https://onemillioncheckboxes.com/) by Nolen Royalty.
+Forked from [one-million-checkboxes-spacetime](https://github.com/gillkyle/one-million-checkboxes-spacetime) by [Kyle Gill](https://github.com/gillkyle), which was inspired by the original [One Million Checkboxes](https://onemillioncheckboxes.com/) by Nolen Royalty. This fork scales it to 1 billion checkboxes, adds 15 colors, a multiplayer Game of Life, and the performance architecture described below.
 
 ---
 

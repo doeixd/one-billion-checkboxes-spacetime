@@ -746,6 +746,10 @@ export default function App() {
           <a href="https://github.com/solidjs/solid/discussions/2596" target="_blank">
             Solid 2.0
           </a>
+          {" · "}
+          <a href="https://github.com/doeixd/one-billion-checkboxes-spacetime" target="_blank">
+            Repo
+          </a>
         </div>
       </div>
 

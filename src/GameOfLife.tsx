@@ -256,6 +256,14 @@ export default function GameOfLife() {
           >
             Solid 2.0
           </a>
+          {" · "}
+          <a
+            style={{ "text-decoration": "none", color: "#6b7280" }}
+            href="https://github.com/doeixd/one-billion-checkboxes-spacetime"
+            target="_blank"
+          >
+            Repo
+          </a>
         </div>
       </div>
 
