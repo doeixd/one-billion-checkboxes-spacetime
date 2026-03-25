@@ -33,7 +33,6 @@ const GOL_CHUNK_BYTES = GOL_COLS / 2;       // 25 bytes per row (nibble-packed)
 const GOL_TICK_INTERVAL_US = 100_000n;        // 100ms — 10 fps when board is active
 const GOL_TICK_INTERVAL_IDLE_US = 2_000_000n; // 2s — board is stable, slow down
 
-const GOL_SNAPSHOT_INTERVAL = 50; // sync row chunks every N ticks (for new client state)
 
 // --- Game of Life pre-allocated buffers (reused every tick; no per-tick allocation) ---
 const _golCurrentBuf = new Uint8Array(GOL_CELL_COUNT);
@@ -683,13 +682,15 @@ export const run_gol_tick = spacetimedb.reducer(
     const seed = Number(ctx.timestamp.microsSinceUnixEpoch & 0xFFFFFFFFn);
     golNextGeneration(_golCurrentBuf, seed);
 
-    // 3. Build cell-level diff into pre-allocated buffer.
+    // 3. Build cell-level diff and track which rows changed.
     let diffLen = 0;
+    const dirtyRows = new Set<number>();
     for (let i = 0; i < GOL_CELL_COUNT; i++) {
       if (_golNextBuf[i] !== _golCurrentBuf[i]) {
         _golDiffBuf[diffLen++] = i % GOL_COLS;              // x
         _golDiffBuf[diffLen++] = (i / GOL_COLS) | 0;        // y
         _golDiffBuf[diffLen++] = _golNextBuf[i];             // color
+        dirtyRows.add((i / GOL_COLS) | 0);
       }
     }
 
@@ -730,18 +731,17 @@ export const run_gol_tick = spacetimedb.reducer(
       ctx.db.golLoopStatus.insert({ id: 0, loopPeriod: reportedPeriod });
     }
 
-    // 8. Periodically sync row chunks for new-client snapshots.
-    if (diffLen > 0 && Number(gen % BigInt(GOL_SNAPSHOT_INTERVAL)) === 0) {
-      for (let rowIdx = 0; rowIdx < GOL_ROWS; rowIdx++) {
-        const base = rowIdx * GOL_COLS;
-        const newCells = new Uint8Array(GOL_CHUNK_BYTES);
-        for (let x = 0; x < GOL_COLS; x++) setColor(newCells, x, _golCurrentBuf[base + x]);
-        const existing = ctx.db.golRowChunk.rowIdx.find(rowIdx);
-        if (existing) {
-          ctx.db.golRowChunk.rowIdx.update({ rowIdx, cells: newCells });
-        } else {
-          ctx.db.golRowChunk.insert({ rowIdx, cells: newCells });
-        }
+    // 8. Update only the changed row chunks every tick (self-contained;
+    //    clients don't need sequential diff accumulation to stay in sync).
+    for (const rowIdx of dirtyRows) {
+      const base = rowIdx * GOL_COLS;
+      const newCells = new Uint8Array(GOL_CHUNK_BYTES);
+      for (let x = 0; x < GOL_COLS; x++) setColor(newCells, x, _golCurrentBuf[base + x]);
+      const existing = ctx.db.golRowChunk.rowIdx.find(rowIdx);
+      if (existing) {
+        ctx.db.golRowChunk.rowIdx.update({ rowIdx, cells: newCells });
+      } else {
+        ctx.db.golRowChunk.insert({ rowIdx, cells: newCells });
       }
     }
 
