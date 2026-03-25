@@ -37,6 +37,7 @@ const NUM_BOXES = 1_000_000_000;
 const NUM_DOCUMENTS = 250_000;
 const CELL_SIZE = 22; // px
 const OVERSCAN = 3; // extra rows above/below viewport
+const MAX_SCROLL_HEIGHT = 15_000_000; // px — safe across all browsers
 
 const PALETTE: string[] = [
   "#f3f4f6", // 0: clear / uncheck
@@ -176,10 +177,11 @@ export default function App() {
     if (cols <= 0) return offset;
     const row = Math.floor(offset / cols);
     scrollFromInput = true;
-    scrollRef.scrollTop = row * CELL_SIZE;
+    // Divide by scrollScale to convert logical pixel position to physical
+    scrollRef.scrollTop = (row * CELL_SIZE) / scrollScale();
     setScrollTop(scrollRef.scrollTop);
     // Read back the actual position (browser clamps scrollTop at the bottom)
-    const actualRow = Math.floor(scrollRef.scrollTop / CELL_SIZE);
+    const actualRow = Math.floor((scrollRef.scrollTop * scrollScale()) / CELL_SIZE);
     const actualOffset = Math.min(actualRow * cols, NUM_BOXES - 1);
     setCurrentOffset(actualOffset);
     requestAnimationFrame(() => { scrollFromInput = false; });
@@ -210,7 +212,7 @@ export default function App() {
         // Recalculate offset for new column count after resize
         if (scrollRef && !scrollFromInput) {
           const cols = Math.max(1, Math.floor((e.contentRect.width - scrollbarWidth()) / CELL_SIZE));
-          const topRow = Math.floor(scrollRef.scrollTop / CELL_SIZE);
+          const topRow = Math.floor((scrollRef.scrollTop * scrollScale()) / CELL_SIZE);
           setCurrentOffset(Math.min(topRow * cols, NUM_BOXES - 1));
         }
       }
@@ -344,13 +346,17 @@ export default function App() {
   const numColumns = () =>
     Math.max(1, Math.floor((size().width - scrollbarWidth()) / CELL_SIZE));
   const numRows = () => Math.ceil(NUM_BOXES / numColumns());
-  // Extra CELL_SIZE ensures the last row can scroll fully into view
-  const totalHeight = () => numRows() * CELL_SIZE + CELL_SIZE;
+  // Logical height of all rows + one extra CELL_SIZE so the last row isn't clipped
+  const logicalHeight = () => numRows() * CELL_SIZE + CELL_SIZE;
+  // Browsers cap scrollable height (~33M px Chrome, ~17M Firefox). Cap the
+  // spacer at a safe maximum and scale scroll position proportionally.
+  const spacerHeight = () => Math.min(logicalHeight(), MAX_SCROLL_HEIGHT);
+  const scrollScale = () => logicalHeight() / spacerHeight();
 
   // The first visible row (with overscan above), clamped at both ends
   // so the pool never overshoots numRows at the bottom.
   const startRow = () => {
-    const raw = Math.floor(scrollTop() / CELL_SIZE) - OVERSCAN;
+    const raw = Math.floor((scrollTop() * scrollScale()) / CELL_SIZE) - OVERSCAN;
     const maxStart = Math.max(0, numRows() - poolRows());
     return Math.max(0, Math.min(raw, maxStart));
   };
@@ -551,7 +557,7 @@ export default function App() {
       // Scroll → offset + URL (skip if this scroll was triggered by input)
       if (!scrollFromInput) {
         const cols = numColumns();
-        const topRow = Math.floor(scrollRef.scrollTop / CELL_SIZE);
+        const topRow = Math.floor((scrollRef.scrollTop * scrollScale()) / CELL_SIZE);
         const offset = Math.min(topRow * cols, NUM_BOXES - 1);
         setCurrentOffset(offset);
 
@@ -694,8 +700,9 @@ export default function App() {
                     if (e.key === "Enter") {
                       const raw = e.currentTarget.value.replace(/[^0-9]/g, "");
                       const n = parseInt(raw, 10);
-                      if (Number.isFinite(n) && n >= 0 && n < NUM_BOXES) {
-                        const actual = scrollToOffset(n);
+                      if (Number.isFinite(n) && n >= 0) {
+                        const clamped = Math.min(n, NUM_BOXES - 1);
+                        const actual = scrollToOffset(clamped);
                         syncOffsetToUrl(actual);
                       }
                       e.currentTarget.blur();
@@ -762,6 +769,15 @@ export default function App() {
             <div
               ref={(el: HTMLDivElement) => {
                 scrollRef = el;
+                // Intercept wheel events to de-scale deltas so mouse/trackpad
+                // scrolling stays smooth despite the compressed spacer.
+                el.addEventListener('wheel', (e) => {
+                  e.preventDefault();
+                  let deltaY = e.deltaY;
+                  if (e.deltaMode === 1) deltaY *= CELL_SIZE; // lines → px
+                  else if (e.deltaMode === 2) deltaY *= size().height; // pages → px
+                  el.scrollTop += deltaY / scrollScale();
+                }, { passive: false });
                 requestAnimationFrame(() => {
                   setScrollbarWidth(el.offsetWidth - el.clientWidth);
                   if (initialOffset > 0) scrollToOffset(initialOffset);
@@ -773,13 +789,13 @@ export default function App() {
               <div
                 class="virtual-spacer"
                 style={{
-                  height: `${totalHeight()}px`,
+                  height: `${spacerHeight()}px`,
                   width: `${numColumns() * CELL_SIZE}px`,
                 }}
               >
                 <div
                   class="row-pool"
-                  style={{ transform: `translateY(${startRow() * CELL_SIZE}px)` }}
+                  style={{ transform: `translateY(${scrollTop() * (1 - scrollScale()) + startRow() * CELL_SIZE}px)` }}
                 >
                   <For each={rowPool()} keyed={false}>
                     {(localRow) => {
