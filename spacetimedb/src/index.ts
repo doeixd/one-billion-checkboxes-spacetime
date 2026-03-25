@@ -603,6 +603,22 @@ export const gol_tap_cell = spacetimedb.reducer(
     if (x >= GOL_COLS || y >= GOL_ROWS) throw new SenderError('Out of bounds');
     ensureGolGrid(ctx);
     golClearLoopHistory(); // new input breaks any detected loop
+
+    // Immediately clear the loop status so clients hide the "loop" indicator
+    const loopRow = ctx.db.golLoopStatus.id.find(0);
+    if (loopRow && loopRow.loopPeriod !== 0) {
+      ctx.db.golLoopStatus.id.update({ id: 0, loopPeriod: 0 });
+    }
+
+    // Cancel the slow idle tick and reschedule at full speed
+    for (const job of ctx.db.golTickJob.iter()) {
+      ctx.db.golTickJob.scheduledId.delete(job.scheduledId);
+    }
+    ctx.db.golTickJob.insert({
+      scheduledId: 0n,
+      scheduledAt: ScheduleAt.time(ctx.timestamp.microsSinceUnixEpoch + GOL_TICK_INTERVAL_US),
+    });
+
     const color = colorFromIdentity(ctx.sender);
 
     // Center + four arms (boundary-safe: skip out-of-bounds).
