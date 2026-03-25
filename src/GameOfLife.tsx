@@ -100,11 +100,14 @@ export default function GameOfLife() {
     conn.db.golRowChunk.onInsert((_ctx: EventContext, row: GolRowChunk) =>
       handleChunk(row),
     );
+    // Row chunk onUpdate: periodic snapshots correct any drift from missed diffs.
     conn.db.golRowChunk.onUpdate((_ctx: EventContext, _old: GolRowChunk, row: GolRowChunk) =>
       handleChunk(row),
     );
 
-    // Diff: packed [x, y, color, ...] triples — one message per tick.
+    // Diff: packed [x, y, color, ...] triples — live per-tick updates.
+    // IMPORTANT: only onUpdate, NOT onInsert. The initial diff row from
+    // subscribe is stale (last tick's data) and would corrupt fresh state.
     const handleDiff = (diff: GolDiff) => {
       const data = diff.data as Uint8Array;
       if (data.length === 0) return;
@@ -116,10 +119,6 @@ export default function GameOfLife() {
         }
       });
     };
-
-    conn.db.golDiff.onInsert((_ctx: EventContext, row: GolDiff) =>
-      handleDiff(row),
-    );
     conn.db.golDiff.onUpdate((_ctx: EventContext, _old: GolDiff, row: GolDiff) =>
       handleDiff(row),
     );
