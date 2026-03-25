@@ -18,14 +18,14 @@ An exploration of two technologies:
 The answer to both is yes, with some careful architecture.
 
 ```
-┌─────────────────────────────┐         ┌──────────────────────────────┐
-│   SolidJS 2.0 Frontend      │ ←────── │   SpacetimeDB Module         │
+┌──────────────────────────────┐         ┌──────────────────────────────┐
+│   SolidJS 2.0 Frontend       │ ←────── │   SpacetimeDB Module         │
 │                              │  subs   │                              │
-│  Scaled virtual scroll (30M) │ ──────→ │  250K rows × 2KB each       │
+│  Scaled virtual scroll (30M) │ ──────→ │  250K rows × 2KB each        │
 │  Fine-grained cell reactivity│ reducer │  Nibble-packed (4 bits/cell) │
 │  Two-phase subscriptions     │  calls  │  Change events (~24B each)   │
 │  Optimistic UI + rate limit  │         │  Scheduled jobs (stats, GOL) │
-└─────────────────────────────┘         └──────────────────────────────┘
+└──────────────────────────────┘         └──────────────────────────────┘
 ```
 
 ```
