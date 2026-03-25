@@ -121,13 +121,14 @@
 }
 
 .offset-input {
-  width: 8ch;
+  width: 10ch;
   border: none;
   border-bottom: 1px solid #d1d5db;
   background: transparent;
   color: var(--text-secondary);
   font-size: 0.8rem;
   font-family: inherit;
+  font-variant-numeric: tabular-nums;
   padding: 0;
   outline: none;
 }

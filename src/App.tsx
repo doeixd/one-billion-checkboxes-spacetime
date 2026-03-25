@@ -168,16 +168,22 @@ export default function App() {
   // When true, the scroll handler won't update currentOffset (prevents loop)
   let scrollFromInput = false;
 
-  /** Scroll the grid to a global checkbox index. */
-  const scrollToOffset = (offset: number) => {
-    if (!scrollRef) return;
+  /** Scroll the grid to a global checkbox index. Returns the actual offset
+   *  after the browser clamps scrollTop (e.g. near the bottom). */
+  const scrollToOffset = (offset: number): number => {
+    if (!scrollRef) return offset;
     const cols = numColumns();
-    if (cols <= 0) return;
+    if (cols <= 0) return offset;
     const row = Math.floor(offset / cols);
     scrollFromInput = true;
     scrollRef.scrollTop = row * CELL_SIZE;
     setScrollTop(scrollRef.scrollTop);
+    // Read back the actual position (browser clamps scrollTop at the bottom)
+    const actualRow = Math.floor(scrollRef.scrollTop / CELL_SIZE);
+    const actualOffset = Math.min(actualRow * cols, NUM_BOXES - 1);
+    setCurrentOffset(actualOffset);
     requestAnimationFrame(() => { scrollFromInput = false; });
+    return actualOffset;
   };
 
   /** Sync offset → URL query param. */
@@ -201,6 +207,12 @@ export default function App() {
       if (e) {
         setSize({ width: e.contentRect.width, height: e.contentRect.height });
         if (!containerMeasured()) setContainerMeasured(true);
+        // Recalculate offset for new column count after resize
+        if (scrollRef && !scrollFromInput) {
+          const cols = Math.max(1, Math.floor((e.contentRect.width - scrollbarWidth()) / CELL_SIZE));
+          const topRow = Math.floor(scrollRef.scrollTop / CELL_SIZE);
+          setCurrentOffset(Math.min(topRow * cols, NUM_BOXES - 1));
+        }
       }
     });
     obs.observe(containerRef);
@@ -332,11 +344,16 @@ export default function App() {
   const numColumns = () =>
     Math.max(1, Math.floor((size().width - scrollbarWidth()) / CELL_SIZE));
   const numRows = () => Math.ceil(NUM_BOXES / numColumns());
-  const totalHeight = () => numRows() * CELL_SIZE;
+  // Extra CELL_SIZE ensures the last row can scroll fully into view
+  const totalHeight = () => numRows() * CELL_SIZE + CELL_SIZE;
 
-  // The first visible row (with overscan above)
-  const startRow = () =>
-    Math.max(0, Math.floor(scrollTop() / CELL_SIZE) - OVERSCAN);
+  // The first visible row (with overscan above), clamped at both ends
+  // so the pool never overshoots numRows at the bottom.
+  const startRow = () => {
+    const raw = Math.floor(scrollTop() / CELL_SIZE) - OVERSCAN;
+    const maxStart = Math.max(0, numRows() - poolRows());
+    return Math.max(0, Math.min(raw, maxStart));
+  };
 
   // How many rows fit in the viewport + overscan on both sides
   const poolRows = () => {
@@ -535,7 +552,7 @@ export default function App() {
       if (!scrollFromInput) {
         const cols = numColumns();
         const topRow = Math.floor(scrollRef.scrollTop / CELL_SIZE);
-        const offset = topRow * cols;
+        const offset = Math.min(topRow * cols, NUM_BOXES - 1);
         setCurrentOffset(offset);
 
         clearTimeout(urlUpdateTimer);
@@ -678,9 +695,8 @@ export default function App() {
                       const raw = e.currentTarget.value.replace(/[^0-9]/g, "");
                       const n = parseInt(raw, 10);
                       if (Number.isFinite(n) && n >= 0 && n < NUM_BOXES) {
-                        setCurrentOffset(n);
-                        scrollToOffset(n);
-                        syncOffsetToUrl(n);
+                        const actual = scrollToOffset(n);
+                        syncOffsetToUrl(actual);
                       }
                       e.currentTarget.blur();
                     }
