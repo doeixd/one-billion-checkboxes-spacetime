@@ -6,7 +6,6 @@ A real-time collaborative app with **one billion checkboxes** and a **multiplaye
 
 Forked from [one-million-checkboxes-spacetime](https://github.com/gillkyle/one-million-checkboxes-spacetime) by [Kyle Gill](https://github.com/gillkyle), which was inspired by the original [One Million Checkboxes](https://onemillioncheckboxes.com/) by Nolen Royalty. This fork scales it to 1 billion checkboxes, adds 15 colors, a multiplayer Game of Life, and the performance architecture described below.
 
----
 
 ## Why This Exists
 
@@ -47,7 +46,6 @@ src/module_bindings/        — Generated SpacetimeDB client SDK (do not edit)
 scripts/                    — Benchmarking and data migration tools
 ```
 
----
 
 ## Data Design
 
@@ -72,7 +70,6 @@ const arrayIdx    = Math.floor(globalIndex / NUM_DOCUMENTS);  // position within
 
 This means scrolling vertically hits different documents, keeping viewport-scoped subscriptions effective.
 
----
 
 ## Subscriptions and Diffs
 
@@ -129,7 +126,6 @@ The `stats` table (one row, always subscribed) holds `totalColored`. It's recalc
 | Stats (server → client) | Scan every 15s | Client-side delta | Avoids hot row |
 | DOM (client) | Re-render all cells | Solid updates 1 node | O(1) per change |
 
----
 
 ## DOM Reuse and Solid 2.0 Reactivity
 
@@ -178,7 +174,6 @@ For the Game of Life at 10 fps, this means each `[x, y, color]` triple from a di
 
 Toggle → update `pendingStore` overlay immediately → call reducer → when the change event arrives back, clear the pending entry. Round-trip time is tracked per-cell and displayed in the UI.
 
----
 
 ## Rate Limiting and Fingerprinting
 
@@ -216,7 +211,6 @@ if (++rateLimitCount > RATE_LIMIT_MAX) {
 
 If a reducer call does make it through but the server rejects it (e.g., another tab exhausted the fingerprint quota), the `.catch()` handler shows the same badge.
 
----
 
 ## Game of Life
 
@@ -263,7 +257,6 @@ When a loop is detected:
 
 Tapping the board calls `gol_tap_cell`, which clears the loop history and returns the tick rate to 100ms. The seed pattern introduces new live cells that break the cycle.
 
----
 
 ## Stack
 
