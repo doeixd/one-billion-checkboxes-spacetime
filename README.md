@@ -10,6 +10,16 @@ Forked from [one-million-checkboxes-spacetime](https://github.com/gillkyle/one-m
 
 ## Why This Exists
 
+This started with a tweet from [Delaney Gillilan](https://x.com/DelaneyGillilan) (CEO of [Datastar](https://data-star.dev/)) challenging the fullstack TypeScript approach:
+
+> Sure, let's see a billion checkbox demo with either of these and compare real flame graphs and code complexity. Most of the time stuff like this is trying to paper over TS being a poor choice for a backend language, let alone full stack.
+
+And then:
+
+> great, make it 1000x bigger and 16 colors plz!
+
+Challenge accepted. This project exists to prove that TypeScript *can* be a great fullstack language — when paired with the right tools.
+
 An exploration of two technologies:
 
 - **SolidJS 2.0** — Fine-grained reactivity without a virtual DOM. Can it handle a billion cells with constant memory and per-cell updates?
