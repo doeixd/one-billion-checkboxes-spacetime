@@ -4,7 +4,25 @@
       "Bash(git commit:*)",
       "Bash(git add:*)",
       "Bash(git push:*)",
-      "Bash(node:*)"
+      "Bash(node:*)",
+      "Bash(spacetime publish:*)",
+      "Bash(spacetime sql:*)",
+      "Bash(spacetime logs:*)",
+      "Bash(spacetime generate:*)",
+      "Bash(npx vite:*)",
+      "Bash(find /c/Users/Patrick/one-billion-checkboxes-spacetime -name index.html -o -name *.css)",
+      "Bash(npm install:*)",
+      "Bash(spacetime build:*)",
+      "Bash(npx tsc:*)",
+      "Bash(SPACETIMEDB_TOKEN=\"eyJhbGciOiJSUzI1NiJ9.eyJzdWIiOiIwMUtNRVZZRk41TkZZN1I3OE5ZWlpOOFhORiIsImlzcyI6Imh0dHBzOi8vYXV0aC5zcGFjZXRpbWVkYi5jb20iLCJhdWQiOiJzcGFjZXRpbWVkYiIsImlhdCI6MTc3NDM2NjcxNywiZXhwIjoxODM3NDM4NzE3fQ.EVhDfnswaxHfHtI9Rm7ThdGG2AhMXlq4l9cpWxglSoKVk8Mgl7GsnYMzj_o6_z60_V-yQbNFLBNFgK2ZpcZjL60LzGQKCGQscEQbjlgo2VR04O6zm9ryodeUh6TSMk7GUTXpqdQO0k0htOSWsgLMUQ9ce1pkcrQPaEUHouezBAHspMK80qqmOkazyNs2vn_RNG_sHoqV1j5qE5tjtupSsCyreH1lHG-FogaaFrCKMJXKbFdaQL7hbbbBPkT5HgH7z1C6kgrAV-5ZtWpnd5O8-MA72rgLx6OZLyhEF7q2kXrEIa-JB1BLGQZan0UKhFI6_qStS98XC6CHYCeGE3j7CQ\" npx tsx scripts/bench-tps.ts)",
+      "Bash(grep -E \"\\\\.\\(ts|json|tsx\\)$\")",
+      "Bash(xxd)",
+      "WebSearch",
+      "Bash(find /c/Users/Patrick/one-billion-checkboxes-spacetime/node_modules/spacetimedb* -name \"*.d.ts\" -o -name \"*.ts\")",
+      "Bash(find /c/Users/Patrick/one-billion-checkboxes-spacetime/node_modules -path */spacetimedb/server* -name *.d.ts)",
+      "WebFetch(domain:github.com)",
+      "WebFetch(domain:raw.githubusercontent.com)",
+      "Bash(git revert:*)"
     ]
   }
 }

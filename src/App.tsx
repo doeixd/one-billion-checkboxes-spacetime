@@ -152,6 +152,7 @@ export default function App() {
 
   // ── UI state ──────────────────────────────────────────────────────────
   const [selectedColor, setSelectedColor] = createSignal(1);
+  const [colsInputFocused, setColsInputFocused] = createSignal(false);
 
   // ── Virtual scroll state ──────────────────────────────────────────────
   let containerRef!: HTMLDivElement;
@@ -159,13 +160,20 @@ export default function App() {
   const [size, setSize] = createSignal({ width: 0, height: 0 });
   const [scrollTop, setScrollTop] = createSignal(0);
 
-  // ── Offset (3-way: scroll ↔ input ↔ URL query param) ─────────────────
+  // ── Offset & columns (URL ↔ input ↔ scroll) ─────────────────────────
+  const urlParams = new URLSearchParams(window.location.search);
   const initialOffset = (() => {
-    const p = new URLSearchParams(window.location.search).get("offset");
+    const p = urlParams.get("offset");
     const n = p ? parseInt(p, 10) : NaN;
     return Number.isFinite(n) && n >= 0 && n < NUM_BOXES ? n : 0;
   })();
+  const initialCols = (() => {
+    const p = urlParams.get("cols");
+    const n = p ? parseInt(p, 10) : NaN;
+    return Number.isFinite(n) && n >= 1 ? n : null;
+  })();
   const [currentOffset, setCurrentOffset] = createSignal(initialOffset);
+  const [customCols, setCustomCols] = createSignal<number | null>(initialCols);
   // When true, the scroll handler won't update currentOffset (prevents loop)
   let scrollFromInput = false;
 
@@ -188,13 +196,19 @@ export default function App() {
     return actualOffset;
   };
 
-  /** Sync offset → URL query param. */
-  const syncOffsetToUrl = (offset: number) => {
+  /** Sync offset + cols → URL query params. */
+  const syncToUrl = (offset: number) => {
     const url = new URL(window.location.href);
     if (offset > 0) {
       url.searchParams.set("offset", String(offset));
     } else {
       url.searchParams.delete("offset");
+    }
+    const cols = customCols();
+    if (cols !== null) {
+      url.searchParams.set("cols", String(cols));
+    } else {
+      url.searchParams.delete("cols");
     }
     history.replaceState(null, "", url);
   };
@@ -343,8 +357,9 @@ export default function App() {
 
   // ── Derived scroll values ─────────────────────────────────────────────
   const [scrollbarWidth, setScrollbarWidth] = createSignal(0);
-  const numColumns = () =>
+  const autoColumns = () =>
     Math.max(1, Math.floor((size().width - scrollbarWidth()) / CELL_SIZE));
+  const numColumns = () => customCols() ?? autoColumns();
   const numRows = () => Math.ceil(NUM_BOXES / numColumns());
   // Logical height of all rows + one extra CELL_SIZE so the last row isn't clipped
   const logicalHeight = () => numRows() * CELL_SIZE + CELL_SIZE;
@@ -562,7 +577,7 @@ export default function App() {
         setCurrentOffset(offset);
 
         clearTimeout(urlUpdateTimer);
-        urlUpdateTimer = window.setTimeout(() => syncOffsetToUrl(offset), 300);
+        urlUpdateTimer = window.setTimeout(() => syncToUrl(offset), 300);
       }
     });
   };
@@ -703,13 +718,51 @@ export default function App() {
                       if (Number.isFinite(n) && n >= 0) {
                         const clamped = Math.min(n, NUM_BOXES - 1);
                         const actual = scrollToOffset(clamped);
-                        syncOffsetToUrl(actual);
+                        syncToUrl(actual);
                       }
                       e.currentTarget.blur();
                     }
                     if (e.key === "Escape") e.currentTarget.blur();
                   }}
                 />
+              </span>
+              <span class="dot-separator">·</span>
+              <span class="cols-group">
+                <span class="offset-hash">cols</span>
+                <input
+                  class="offset-input cols-input"
+                  type="text"
+                  inputmode="numeric"
+                  value={customCols() !== null ? String(customCols()) : ""}
+                  onFocus={(e) => {
+                    setColsInputFocused(true);
+                    e.currentTarget.value = customCols() !== null ? String(customCols()) : "";
+                    e.currentTarget.select();
+                  }}
+                  onBlur={(e) => {
+                    setColsInputFocused(false);
+                    e.currentTarget.value = customCols() !== null ? String(customCols()) : "";
+                  }}
+                  onKeyDown={(e) => {
+                    if (e.key === "Enter") {
+                      const raw = e.currentTarget.value.replace(/[^0-9]/g, "");
+                      const offset = currentOffset();
+                      if (raw === "") {
+                        setCustomCols(null);
+                      } else {
+                        const n = parseInt(raw, 10);
+                        if (Number.isFinite(n) && n >= 1) setCustomCols(n);
+                      }
+                      const actual = scrollToOffset(offset);
+                      syncToUrl(actual);
+                      e.currentTarget.blur();
+                    }
+                    if (e.key === "Escape") e.currentTarget.blur();
+                  }}
+                />
+                <span class="cols-hint" style={{ opacity: colsInputFocused() ? "1" : "0" }}>
+                  Enter to submit
+                </span>
               </span>
             </Show>
           </div>

@@ -133,6 +133,23 @@
   outline: none;
 }
 
+.cols-group {
+  display: inline-flex;
+  align-items: baseline;
+  gap: 4px;
+}
+
+.cols-input {
+  width: 5ch;
+}
+
+.cols-hint {
+  font-size: 0.65rem;
+  color: var(--text-muted);
+  transition: opacity 0.15s ease-out;
+  white-space: nowrap;
+}
+
 /* ── Color palette ─────────────────────────────────────────────── */
 .palette-section {
   display: flex;
