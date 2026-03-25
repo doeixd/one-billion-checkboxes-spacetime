@@ -44,6 +44,47 @@ const _golDiffBuf    = new Uint8Array(GOL_CELL_COUNT * 3);
 // Whether _golCurrentBuf has been populated from DB (needed after republish).
 let _golBufferHydrated = false;
 
+// --- Loop detection ---
+// Rolling hash history to detect oscillating patterns (period 1–64).
+const GOL_LOOP_HISTORY_SIZE = 64;
+const _golHashHistory = new Uint32Array(GOL_LOOP_HISTORY_SIZE);
+let _golHashCount = 0;
+// Packed alive/dead bits for hashing: ceil(2500/8) = 313 bytes.
+const _golBitsBuf = new Uint8Array(Math.ceil(GOL_CELL_COUNT / 8));
+
+/** FNV-1a 32-bit hash of the alive/dead bit pattern (ignoring colors). */
+function golStateHash(cells: Uint8Array): number {
+  _golBitsBuf.fill(0);
+  for (let i = 0; i < GOL_CELL_COUNT; i++) {
+    if (cells[i]) _golBitsBuf[i >> 3] |= (1 << (i & 7));
+  }
+  let h = 0x811c9dc5;
+  for (let i = 0; i < _golBitsBuf.length; i++) {
+    h ^= _golBitsBuf[i];
+    h = Math.imul(h, 0x01000193);
+  }
+  return h >>> 0;
+}
+
+/** Check if hash matches any in history. Returns period (distance back) or 0. */
+function golCheckLoop(hash: number): number {
+  const count = Math.min(_golHashCount, GOL_LOOP_HISTORY_SIZE);
+  for (let i = 1; i <= count; i++) {
+    const idx = ((_golHashCount - i) % GOL_LOOP_HISTORY_SIZE + GOL_LOOP_HISTORY_SIZE) % GOL_LOOP_HISTORY_SIZE;
+    if (_golHashHistory[idx] === hash) return i;
+  }
+  return 0;
+}
+
+function golRecordHash(hash: number): void {
+  _golHashHistory[_golHashCount % GOL_LOOP_HISTORY_SIZE] = hash;
+  _golHashCount++;
+}
+
+function golClearLoopHistory(): void {
+  _golHashCount = 0;
+}
+
 // --- Nibble manipulation helpers ---
 
 /** Returns a zero-filled byte array representing 4,000 unchecked/uncolored boxes. */
@@ -140,6 +181,15 @@ const GolMeta = table(
   }
 );
 
+// Single-row loop detection status (separate table to avoid migration).
+const GolLoopStatus = table(
+  { name: 'gol_loop_status', public: true },
+  {
+    id:         t.u32().primaryKey(),
+    loopPeriod: t.u32(), // 0 = not looping, N = detected oscillator period
+  }
+);
+
 // Per-tick diff: single row containing packed cell changes [x, y, color, ...].
 // Clients subscribe to this instead of gol_row_chunk for live updates — one
 // WebSocket message per tick instead of up to 50 row-chunk updates.
@@ -220,6 +270,7 @@ const spacetimedb = schema({
   golRowChunk: GolRowChunk,
   golMeta: GolMeta,
   golDiff: GolDiff,
+  golLoopStatus: GolLoopStatus,
   golTickJob: GolTickJob,
 });
 export default spacetimedb;
@@ -515,6 +566,7 @@ function golNextGeneration(cells: Uint8Array, seed: number): Uint8Array {
 function ensureGolGrid(ctx: any): void {
   if (ctx.db.golMeta.id.find(0)) return; // already initialised
   ctx.db.golMeta.insert({ id: 0, generation: 0n });
+  ctx.db.golLoopStatus.insert({ id: 0, loopPeriod: 0 });
   ctx.db.golDiff.insert({ id: 0, data: new Uint8Array(0) });
   for (let rowIdx = 0; rowIdx < GOL_ROWS; rowIdx++) {
     ctx.db.golRowChunk.insert({ rowIdx, cells: new Uint8Array(GOL_CHUNK_BYTES) });
@@ -550,6 +602,7 @@ export const gol_tap_cell = spacetimedb.reducer(
     checkRateLimit(ctx);
     if (x >= GOL_COLS || y >= GOL_ROWS) throw new SenderError('Out of bounds');
     ensureGolGrid(ctx);
+    golClearLoopHistory(); // new input breaks any detected loop
     const color = colorFromIdentity(ctx.sender);
 
     // Center + four arms (boundary-safe: skip out-of-bounds).
@@ -624,10 +677,15 @@ export const run_gol_tick = spacetimedb.reducer(
       }
     }
 
-    // 4. Advance in-memory state: current ← next for the next tick.
+    // 4. Loop detection: hash the alive/dead pattern and check history.
+    const stateHash = golStateHash(_golNextBuf);
+    const loopPeriod = golCheckLoop(stateHash);
+    golRecordHash(stateHash);
+
+    // 5. Advance in-memory state: current ← next for the next tick.
     _golCurrentBuf.set(_golNextBuf);
 
-    // 5. Write diff row (single broadcast per tick). Skip when idle to avoid
+    // 6. Write diff row (single broadcast per tick). Skip when idle to avoid
     //    broadcasting an empty byte array every 2s.
     if (diffLen > 0) {
       const diffRow = ctx.db.golDiff.id.find(0);
@@ -639,12 +697,22 @@ export const run_gol_tick = spacetimedb.reducer(
       }
     }
 
-    // 6. Update generation counter.
+    // 7. Update generation counter.
     const meta = ctx.db.golMeta.id.find(0)!;
     const gen = meta.generation + 1n;
     ctx.db.golMeta.id.update({ ...meta, generation: gen });
 
-    // 7. Periodically sync row chunks for new-client snapshots.
+    // 7b. Update loop detection status.
+    const loopRow = ctx.db.golLoopStatus.id.find(0);
+    if (loopRow) {
+      if (loopRow.loopPeriod !== loopPeriod) {
+        ctx.db.golLoopStatus.id.update({ id: 0, loopPeriod });
+      }
+    } else {
+      ctx.db.golLoopStatus.insert({ id: 0, loopPeriod });
+    }
+
+    // 8. Periodically sync row chunks for new-client snapshots.
     if (diffLen > 0 && Number(gen % BigInt(GOL_SNAPSHOT_INTERVAL)) === 0) {
       for (let rowIdx = 0; rowIdx < GOL_ROWS; rowIdx++) {
         const base = rowIdx * GOL_COLS;
@@ -659,8 +727,9 @@ export const run_gol_tick = spacetimedb.reducer(
       }
     }
 
-    // 8. Adaptive reschedule: slow down when the board is stable.
-    const interval = diffLen > 0 ? GOL_TICK_INTERVAL_US : GOL_TICK_INTERVAL_IDLE_US;
+    // 9. Adaptive reschedule: pause on loop/stable, full speed otherwise.
+    const isActive = diffLen > 0 && loopPeriod === 0;
+    const interval = isActive ? GOL_TICK_INTERVAL_US : GOL_TICK_INTERVAL_IDLE_US;
     ctx.db.golTickJob.insert({
       scheduledId: 0n,
       scheduledAt: ScheduleAt.time(ctx.timestamp.microsSinceUnixEpoch + interval),

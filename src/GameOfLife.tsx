@@ -30,7 +30,7 @@ import {
 } from "solid-js";
 import { conn, isConnected } from "./main.tsx";
 import type { EventContext } from "./module_bindings/index.ts";
-import type { GolRowChunk, GolMeta, GolDiff } from "./module_bindings/types.ts";
+import type { GolRowChunk, GolMeta, GolDiff, GolLoopStatus } from "./module_bindings/types.ts";
 import "./gol.css";
 
 const GOL_COLS = 50;
@@ -54,6 +54,7 @@ function calcCellSize() {
 export default function GameOfLife() {
   const [cells, setCells] = createStore<number[]>(new Array(CELL_COUNT).fill(0));
   const [generation, setGeneration] = createSignal(0n);
+  const [loopPeriod, setLoopPeriod] = createSignal(0);
   const [cellPx, setCellPx] = createSignal(calcCellSize());
 
   // Recalculate on resize
@@ -131,12 +132,18 @@ export default function GameOfLife() {
       setGeneration(row.generation),
     );
 
+    // Loop detection status
+    const handleLoop = (row: GolLoopStatus) => setLoopPeriod(row.loopPeriod);
+    conn.db.golLoopStatus.onInsert((_ctx: EventContext, row: GolLoopStatus) => handleLoop(row));
+    conn.db.golLoopStatus.onUpdate((_ctx: EventContext, _old: GolLoopStatus, row: GolLoopStatus) => handleLoop(row));
+
     conn.subscriptionBuilder()
       .onApplied(() => resolveSubscription())
       .subscribe([
         "SELECT * FROM gol_row_chunk",
         "SELECT * FROM gol_diff",
         "SELECT * FROM gol_meta",
+        "SELECT * FROM gol_loop_status",
       ]);
   });
 
@@ -221,6 +228,16 @@ export default function GameOfLife() {
           <span style={{ "font-size": "0.8rem", color: "#6b7280" }}>
             Gen {generation().toString()}
           </span>
+          <Show when={loopPeriod() > 0}>
+            <span style={{
+              "font-size": "0.75rem",
+              color: "#d97706",
+              "font-weight": "600",
+            }}>
+              {loopPeriod() === 1 ? "Static" : `Loop (period ${loopPeriod()})`}
+              {" — tap the board to resume"}
+            </span>
+          </Show>
         </div>
 
         <div style={{ "font-size": "0.75rem", color: "#6b7280" }}>

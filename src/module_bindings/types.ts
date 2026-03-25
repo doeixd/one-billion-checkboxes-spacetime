@@ -45,6 +45,12 @@ export const GolGrid = __t.object("GolGrid", {
 });
 export type GolGrid = __Infer<typeof GolGrid>;
 
+export const GolLoopStatus = __t.object("GolLoopStatus", {
+  id: __t.u32(),
+  loopPeriod: __t.u32(),
+});
+export type GolLoopStatus = __Infer<typeof GolLoopStatus>;
+
 export const GolMeta = __t.object("GolMeta", {
   id: __t.u32(),
   generation: __t.u64(),

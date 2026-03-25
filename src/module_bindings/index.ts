@@ -48,6 +48,7 @@ import CheckboxChangesRow from "./checkbox_changes_table";
 import CheckboxesRow from "./checkboxes_table";
 import GolDiffRow from "./gol_diff_table";
 import GolGridRow from "./gol_grid_table";
+import GolLoopStatusRow from "./gol_loop_status_table";
 import GolMetaRow from "./gol_meta_table";
 import GolRowChunkRow from "./gol_row_chunk_table";
 import StatsRow from "./stats_table";
@@ -100,6 +101,17 @@ const tablesSchema = __schema({
       { name: 'gol_grid_id_key', constraint: 'unique', columns: ['id'] },
     ],
   }, GolGridRow),
+  golLoopStatus: __table({
+    name: 'gol_loop_status',
+    indexes: [
+      { accessor: 'id', name: 'gol_loop_status_id_idx_btree', algorithm: 'btree', columns: [
+        'id',
+      ] },
+    ],
+    constraints: [
+      { name: 'gol_loop_status_id_key', constraint: 'unique', columns: ['id'] },
+    ],
+  }, GolLoopStatusRow),
   golMeta: __table({
     name: 'gol_meta',
     indexes: [

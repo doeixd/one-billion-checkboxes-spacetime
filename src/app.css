@@ -1,0 +1,269 @@
+/* ── CSS Variables ──────────────────────────────────────────────── */
+:root {
+  --cell-size: 22px;
+  --cell-inner: 20px; /* cell-size - 2px padding */
+  --border-light: #e5e7eb;
+  --text-muted: #9ca3af;
+  --text-secondary: #6b7280;
+  --text-dark: #374151;
+}
+
+/* ── App shell ─────────────────────────────────────────────────── */
+.app-root {
+  display: flex;
+  flex-direction: column;
+  height: 100vh;
+  width: 100vw;
+  overflow: hidden;
+  font-family: system-ui, sans-serif;
+}
+
+/* ── Header ────────────────────────────────────────────────────── */
+.header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 8px 12px;
+  border-bottom: 1px solid var(--border-light);
+  background: #fff;
+  flex-shrink: 0;
+  gap: 12px;
+  flex-wrap: wrap;
+}
+
+.title-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.title {
+  font-weight: 700;
+  font-size: 1rem;
+}
+
+/* ── Spinners ──────────────────────────────────────────────────── */
+.spinner {
+  display: inline-block;
+  border-radius: 50%;
+  animation: spin 0.75s linear infinite;
+  flex-shrink: 0;
+}
+
+.spinner-sm {
+  width: 10px;
+  height: 10px;
+  border: 2px solid var(--border-light);
+  border-top-color: var(--text-secondary);
+}
+
+.spinner-xs {
+  width: 8px;
+  height: 8px;
+  border: 1.5px solid var(--border-light);
+  border-top-color: var(--text-muted);
+  animation-duration: 0.6s;
+}
+
+.spinner-lg {
+  width: 28px;
+  height: 28px;
+  border: 3px solid var(--border-light);
+  border-top-color: var(--text-secondary);
+}
+
+/* ── Round-trip indicator ──────────────────────────────────────── */
+.round-trip {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 38px;
+  font-size: 0.7rem;
+  font-variant-numeric: tabular-nums;
+  transition: opacity 0.2s ease-out;
+}
+
+.round-trip-ms {
+  color: #16a34a;
+}
+
+/* ── Rate limit badge ──────────────────────────────────────────── */
+.rate-limited {
+  font-size: 0.7rem;
+  font-weight: 600;
+  color: #dc2626;
+  transition: opacity 0.2s ease-out;
+}
+
+/* ── Subtitle / stats row ──────────────────────────────────────── */
+.subtitle {
+  color: var(--text-secondary);
+  font-size: 0.8rem;
+  margin-top: 2px;
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
+}
+
+.dot-separator {
+  color: #d1d5db;
+}
+
+.offset-group {
+  display: inline-flex;
+  align-items: baseline;
+  gap: 2px;
+}
+
+.offset-hash {
+  color: var(--text-muted);
+  font-size: 0.75rem;
+}
+
+.offset-input {
+  width: 8ch;
+  border: none;
+  border-bottom: 1px solid #d1d5db;
+  background: transparent;
+  color: var(--text-secondary);
+  font-size: 0.8rem;
+  font-family: inherit;
+  padding: 0;
+  outline: none;
+}
+
+/* ── Color palette ─────────────────────────────────────────────── */
+.palette-section {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+
+.palette-label {
+  font-size: 0.75rem;
+  color: var(--text-muted);
+}
+
+.palette-row {
+  display: flex;
+  gap: 3px;
+  flex-wrap: wrap;
+}
+
+.palette-btn {
+  width: 20px;
+  height: 20px;
+  border-radius: 3px;
+  cursor: pointer;
+  padding: 0;
+  font-size: 9px;
+  color: var(--text-dark);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+}
+
+.palette-btn-selected {
+  border: 2px solid #1f2937;
+}
+
+.palette-btn-unselected {
+  border: 1px solid #d1d5db;
+}
+
+/* ── Footer links ──────────────────────────────────────────────── */
+.footer-links {
+  font-size: 0.75rem;
+  color: var(--text-muted);
+  text-align: right;
+}
+
+.footer-links a {
+  text-decoration: none;
+  color: var(--text-secondary);
+}
+
+.footer-links a.link-bold {
+  font-weight: 600;
+}
+
+/* ── Grid container ────────────────────────────────────────────── */
+.grid-container {
+  flex-grow: 1;
+  overflow: hidden;
+  position: relative;
+}
+
+/* ── Loading fallback ──────────────────────────────────────────── */
+.loading-fallback {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  height: 100%;
+  gap: 10px;
+  color: var(--text-muted);
+  font-family: system-ui, sans-serif;
+}
+
+.loading-fallback span:last-child {
+  font-size: 0.875rem;
+}
+
+/* ── Scroll / virtual grid ─────────────────────────────────────── */
+.scroll-container {
+  width: 100%;
+  height: 100%;
+  overflow: auto;
+}
+
+.virtual-spacer {
+  position: relative;
+  margin: 0 auto;
+}
+
+.row-pool {
+  position: absolute;
+  top: 0;
+  left: 0;
+  width: 100%;
+  will-change: transform;
+}
+
+.grid-row {
+  display: flex;
+  height: var(--cell-size);
+}
+
+/* ── Cell (outer wrapper with padding, inner is .cell) ─────────── */
+.cell-wrapper {
+  width: var(--cell-size);
+  height: var(--cell-size);
+  padding: 1px;
+}
+
+.cell {
+  width: var(--cell-inner);
+  height: var(--cell-inner);
+  border-radius: 3px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 12px;
+  line-height: 1;
+  cursor: pointer;
+  color: #fff;
+  background-color: #fff;
+  border: 1px solid var(--border-light);
+}
+
+.cell-filled {
+  background-color: var(--cell-color);
+  border-color: var(--cell-color);
+}
+
+.cell-loading {
+  cursor: default;
+}

@@ -25,6 +25,7 @@ import {
   Show,
   Loading,
 } from "solid-js";
+import "./app.css";
 import { conn, isConnected } from "./main.tsx";
 import type { EventContext } from "./module_bindings/index.ts";
 import type { SubscriptionHandle } from "./module_bindings/index.ts";
@@ -609,131 +610,67 @@ export default function App() {
   // ─────────────────────────────────────────────────────────────────────────
 
   return (
-    <div
-      style={{
-        display: "flex",
-        "flex-direction": "column",
-        height: "100vh",
-        width: "100vw",
-        "box-sizing": "border-box",
-        overflow: "hidden",
-        "font-family": "system-ui, sans-serif",
-      }}
-    >
+    <div class="app-root">
       {/* ── Header ── */}
-      <div
-        style={{
-          display: "flex",
-          "justify-content": "space-between",
-          "align-items": "center",
-          padding: "8px 12px",
-          "border-bottom": "1px solid #e5e7eb",
-          background: "#fff",
-          "flex-shrink": "0",
-          gap: "12px",
-          "flex-wrap": "wrap",
-        }}
-      >
+      <div class="header">
         <div>
-          <div style={{ display: "flex", "align-items": "center", gap: "6px" }}>
-            <span style={{ "font-weight": "700", "font-size": "1rem" }}>
-              One Billion Checkboxes
-            </span>
+          <div class="title-row">
+            <span class="title">One Billion Checkboxes</span>
             <Show when={isSyncing()}>
               <span
                 aria-label="Connecting…"
-                style={{
-                  display: "inline-block",
-                  width: "10px",
-                  height: "10px",
-                  border: "2px solid #e5e7eb",
-                  "border-top-color": "#6b7280",
-                  "border-radius": "50%",
-                  animation: "spin 0.75s linear infinite",
-                  "flex-shrink": "0",
-                }}
+                class="spinner spinner-sm"
               />
             </Show>
             {/* Toggle round-trip indicator */}
             <span
+              class="round-trip"
               style={{
-                display: "inline-flex",
-                "align-items": "center",
-                "justify-content": "center",
-                "min-width": "38px",
-                "font-size": "0.7rem",
-                "font-variant-numeric": "tabular-nums",
                 opacity:
                   !isSyncing() &&
                   (pendingToggleCount() > 0 || lastRoundTripMs() !== null)
                     ? "1"
                     : "0",
-                transition: "opacity 0.2s ease-out",
               }}
             >
               <Show
                 when={pendingToggleCount() > 0}
                 fallback={
-                  <span style={{ color: "#16a34a" }}>
+                  <span class="round-trip-ms">
                     {lastRoundTripMs()}ms
                   </span>
                 }
               >
-                <span
-                  style={{
-                    display: "inline-block",
-                    width: "8px",
-                    height: "8px",
-                    border: "1.5px solid #e5e7eb",
-                    "border-top-color": "#9ca3af",
-                    "border-radius": "50%",
-                    animation: "spin 0.6s linear infinite",
-                  }}
-                />
+                <span class="spinner spinner-xs" />
               </Show>
             </span>
             <span
-              style={{
-                "font-size": "0.7rem",
-                "font-weight": "600",
-                color: "#dc2626",
-                opacity: rateLimited() ? "1" : "0",
-                transition: "opacity 0.2s ease-out",
-              }}
+              class="rate-limited"
+              style={{ opacity: rateLimited() ? "1" : "0" }}
             >
               Rate Limited
             </span>
           </div>
-          <div
-            style={{
-              color: "#6b7280",
-              "font-size": "0.8rem",
-              "margin-top": "2px",
-              display: "flex",
-              "align-items": "baseline",
-              gap: "6px",
-            }}
-          >
+          <div class="subtitle">
             <span>
               {!statsReady()
                 ? "Connecting…"
                 : `${(Number(totalColored()) + pendingCountDelta()).toLocaleString()} colored`}
             </span>
             <Show when={statsReady()}>
-              <span style={{ color: "#d1d5db" }}>·</span>
-              <span style={{ display: "inline-flex", "align-items": "baseline", gap: "2px" }}>
-                <span style={{ color: "#9ca3af", "font-size": "0.75rem" }}>#</span>
+              <span class="dot-separator">·</span>
+              <span class="offset-group">
+                <span class="offset-hash">#</span>
                 <input
+                  class="offset-input"
                   type="text"
                   inputmode="numeric"
                   value={currentOffset().toLocaleString()}
                   onFocus={(e) => {
-                    // Switch to raw number for easy editing
                     e.currentTarget.value = String(currentOffset());
                     e.currentTarget.select();
                   }}
                   onBlur={(e) => {
-                    // Reformat with commas on blur
                     e.currentTarget.value = currentOffset().toLocaleString();
                   }}
                   onKeyDown={(e) => {
@@ -749,17 +686,6 @@ export default function App() {
                     }
                     if (e.key === "Escape") e.currentTarget.blur();
                   }}
-                  style={{
-                    width: "8ch",
-                    border: "none",
-                    "border-bottom": "1px solid #d1d5db",
-                    background: "transparent",
-                    color: "#6b7280",
-                    "font-size": "0.8rem",
-                    "font-family": "inherit",
-                    padding: "0",
-                    outline: "none",
-                  }}
                 />
               </span>
             </Show>
@@ -767,42 +693,17 @@ export default function App() {
         </div>
 
         {/* Color palette */}
-        <div
-          style={{
-            display: "flex",
-            "align-items": "center",
-            gap: "6px",
-            "flex-wrap": "wrap",
-          }}
-        >
-          <span style={{ "font-size": "0.75rem", color: "#9ca3af" }}>
-            Color:
-          </span>
-          <div style={{ display: "flex", gap: "3px", "flex-wrap": "wrap" }}>
+        <div class="palette-section">
+          <span class="palette-label">Color:</span>
+          <div class="palette-row">
             <For each={PALETTE} keyed={false}>
               {(colorAccessor, i) => (
                 <button
-                  onClick={() => {
-                    setSelectedColor(i());
-                  }}
+                  class={`palette-btn ${selectedColor() === i() ? "palette-btn-selected" : "palette-btn-unselected"}`}
+                  onClick={() => setSelectedColor(i())}
                   title={i() === 0 ? "Clear (uncheck)" : `Color ${i()}`}
                   style={{
-                    width: "20px",
-                    height: "20px",
                     "background-color": i() === 0 ? "#fff" : colorAccessor(),
-                    border:
-                      selectedColor() === i()
-                        ? "2px solid #1f2937"
-                        : "1px solid #d1d5db",
-                    "border-radius": "3px",
-                    cursor: "pointer",
-                    padding: "0",
-                    "font-size": "9px",
-                    color: "#374151",
-                    display: "flex",
-                    "align-items": "center",
-                    "justify-content": "center",
-                    "flex-shrink": "0",
                   }}
                 >
                   {i() === 0 ? "✕" : ""}
@@ -812,71 +713,28 @@ export default function App() {
           </div>
         </div>
 
-        <div
-          style={{
-            "font-size": "0.75rem",
-            color: "#9ca3af",
-            "text-align": "right",
-          }}
-        >
-          <a
-            href="/life"
-            style={{ "text-decoration": "none", color: "#6b7280", "font-weight": "600" }}
-          >
-            Game of Life
-          </a>
+        <div class="footer-links">
+          <a href="/life" class="link-bold">Game of Life</a>
           {" · "}
-          <a
-            style={{ "text-decoration": "none", color: "#6b7280" }}
-            href="https://spacetimedb.com/?referral=gillkyle"
-            target="_blank"
-          >
+          <a href="https://spacetimedb.com/?referral=gillkyle" target="_blank">
             Powered by SpacetimeDB
           </a>
           {" and "}
-          <a
-            style={{ "text-decoration": "none", color: "#6b7280" }}
-            href="https://github.com/solidjs/solid/discussions/2596"
-            target="_blank"
-          >
+          <a href="https://github.com/solidjs/solid/discussions/2596" target="_blank">
             Solid 2.0
           </a>
         </div>
       </div>
 
       {/* ── Grid container (measured by ResizeObserver) ── */}
-      <div
-        ref={containerRef}
-        style={{ "flex-grow": "1", overflow: "hidden", position: "relative" }}
-      >
+      <div ref={containerRef} class="grid-container">
         {/* eslint-disable-next-line @typescript-eslint/no-explicit-any */}
         <Loading
           {...({ on: gridReady } as any)}
           fallback={
-            <div
-              style={{
-                display: "flex",
-                "flex-direction": "column",
-                "align-items": "center",
-                "justify-content": "center",
-                height: "100%",
-                gap: "10px",
-                color: "#9ca3af",
-                "font-family": "system-ui, sans-serif",
-              }}
-            >
-              <span
-                style={{
-                  display: "inline-block",
-                  width: "28px",
-                  height: "28px",
-                  border: "3px solid #e5e7eb",
-                  "border-top-color": "#6b7280",
-                  "border-radius": "50%",
-                  animation: "spin 0.75s linear infinite",
-                }}
-              />
-              <span style={{ "font-size": "0.875rem" }}>
+            <div class="loading-fallback">
+              <span class="spinner spinner-lg" />
+              <span>
                 {isConnected()
                   ? "Loading checkboxes…"
                   : "Connecting to SpacetimeDB…"}
@@ -885,7 +743,6 @@ export default function App() {
           }
         >
           <Show when={gridReady()}>
-            {/* Scroll container with spacer for native scrollbar */}
             <div
               ref={(el: HTMLDivElement) => {
                 scrollRef = el;
@@ -894,40 +751,25 @@ export default function App() {
                   if (initialOffset > 0) scrollToOffset(initialOffset);
                 });
               }}
-              style={{ width: "100%", height: "100%", overflow: "auto" }}
+              class="scroll-container"
               onScroll={onScroll}
             >
-              {/* Spacer sets the full virtual height for scrollbar sizing */}
               <div
+                class="virtual-spacer"
                 style={{
                   height: `${totalHeight()}px`,
                   width: `${numColumns() * CELL_SIZE}px`,
-                  position: "relative",
-                  margin: "0 auto",
                 }}
               >
-                {/*
-                Fixed pool of DOM elements positioned via translateY.
-                On scroll, startRow changes → each cell's index updates →
-                SolidJS only touches DOM nodes whose color actually changed.
-              */}
                 <div
-                  style={{
-                    position: "absolute",
-                    top: "0",
-                    left: "0",
-                    width: "100%",
-                    transform: `translateY(${startRow() * CELL_SIZE}px)`,
-                    "will-change": "transform",
-                  }}
+                  class="row-pool"
+                  style={{ transform: `translateY(${startRow() * CELL_SIZE}px)` }}
                 >
                   <For each={rowPool()} keyed={false}>
                     {(localRow) => {
                       const rowIdx = () => startRow() + localRow();
                       return (
-                        <div
-                          style={{ display: "flex", height: `${CELL_SIZE}px` }}
-                        >
+                        <div class="grid-row">
                           <For each={colPool()} keyed={false}>
                             {(col) => {
                               const globalIndex = () =>
@@ -937,7 +779,7 @@ export default function App() {
                               const arrayIdx = () =>
                                 Math.floor(globalIndex() / NUM_DOCUMENTS);
                               const colorVal = () => {
-                                if (globalIndex() >= NUM_BOXES) return -1; // out of range
+                                if (globalIndex() >= NUM_BOXES) return -1;
                                 return getCellColor(documentIdx(), arrayIdx());
                               };
                               const isColored = () => colorVal() > 0;
@@ -945,33 +787,20 @@ export default function App() {
 
                               return (
                                 <div
+                                  class="cell-wrapper"
                                   style={{
-                                    width: `${CELL_SIZE}px`,
-                                    height: `${CELL_SIZE}px`,
-                                    padding: "1px",
                                     visibility: isVisible()
                                       ? "visible"
                                       : "hidden",
                                   }}
                                 >
                                   <div
-                                    class={
-                                      isColored() ? "cell cell-filled" : "cell"
-                                    }
+                                    class={`cell${isColored() ? " cell-filled" : ""}${loading() ? " cell-loading" : ""}`}
                                     onClick={() => {
                                       if (!isVisible() || loading()) return;
                                       toggle(documentIdx(), arrayIdx());
                                     }}
-                                    style={{
-                                      width: `${CELL_SIZE - 2}px`,
-                                      height: `${CELL_SIZE - 2}px`,
-                                      "background-color": isColored()
-                                        ? PALETTE[colorVal()]
-                                        : "#fff",
-                                      border: `1px solid ${isColored() ? PALETTE[colorVal()] : "#e5e7eb"}`,
-                                      cursor: loading() ? "default" : "pointer",
-                                      color: "#fff",
-                                    }}
+                                    style={isColored() ? { "--cell-color": PALETTE[colorVal()] } : undefined}
                                   >
                                     {isColored() ? "✓" : ""}
                                   </div>
