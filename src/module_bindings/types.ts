@@ -38,6 +38,13 @@ export const GolDiff = __t.object("GolDiff", {
 });
 export type GolDiff = __Infer<typeof GolDiff>;
 
+export const GolDiffV2 = __t.object("GolDiffV2", {
+  id: __t.u32(),
+  version: __t.u64(),
+  data: __t.byteArray(),
+});
+export type GolDiffV2 = __Infer<typeof GolDiffV2>;
+
 export const GolGrid = __t.object("GolGrid", {
   id: __t.u32(),
   cells: __t.byteArray(),
@@ -62,6 +69,13 @@ export const GolRowChunk = __t.object("GolRowChunk", {
   cells: __t.byteArray(),
 });
 export type GolRowChunk = __Infer<typeof GolRowChunk>;
+
+export const GolSync = __t.object("GolSync", {
+  id: __t.u32(),
+  version: __t.u64(),
+  generation: __t.u64(),
+});
+export type GolSync = __Infer<typeof GolSync>;
 
 export const GolTickJob = __t.object("GolTickJob", {
   scheduledId: __t.u64(),

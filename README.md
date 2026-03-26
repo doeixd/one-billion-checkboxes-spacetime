@@ -218,7 +218,7 @@ The `/life` route hosts a 50×50 multiplayer Conway's Game of Life.
 
 - **Tap to seed**: Stamps a cross-shaped (+) pattern in your color (deterministic from identity)
 - **Color inheritance**: Born cells inherit color from a random living neighbor (seeded PRNG)
-- **Permanent subscriptions**: All 4 GOL tables subscribed at once (small grid, always visible)
+- **Versioned handoff**: Bootstrap from row snapshots, then switch to versioned live diffs
 
 ### Zero-Allocation Tick Loop
 
@@ -230,7 +230,7 @@ const _golNextBuf    = new Uint8Array(2500);   // next generation
 const _golDiffBuf    = new Uint8Array(7500);   // worst-case diff (3 bytes × 2500 cells)
 ```
 
-Each tick: compute next generation → build cell-level diff into `_golDiffBuf` → write a single `golDiff` row (only the meaningful slice) → copy next into current. Full snapshots written to `golRowChunk` every 50 ticks for late-joining clients.
+Each tick: compute next generation → build cell-level diff into `_golDiffBuf` → write a single live diff row → update only the changed `golRowChunk` rows for bootstrap correctness → copy next into current. Taps also increment the board version, so client sync correctness does not depend on generation changes alone.
 
 The diff encoding is packed `[x, y, color]` triples — 3 bytes per changed cell. A typical tick costs ~150 bytes vs. 1,250 for a full snapshot (~8x reduction). The client unpacks and applies each triple as a single SolidJS store write:
 
@@ -241,11 +241,27 @@ for (let i = 0; i + 2 < diff.data.length; i += 3) {
 }
 ```
 
+### Bootstrap, Diffs, and Versioning
+
+The GOL client uses a two-step sync path:
+
+1. Subscribe to `gol_row_chunk` + `gol_sync` and build a full 50x50 snapshot.
+2. Switch to `gol_diff_v2`, where every diff row also carries a monotonic `version`.
+
+`gol_sync` stores both `generation` and `version`:
+
+- `generation` increments every simulation tick
+- `version` increments on every visible board change, including user taps between generations
+
+That distinction matters because a tap changes the board immediately without advancing the simulation. Using `version` lets the client detect gaps or stale handoffs and re-bootstrap if needed.
+
+The older `gol_diff` table is still written for backward compatibility, but the current client uses `gol_diff_v2`.
+
 ### Loop Detection and Pausing
 
 Conway's Game of Life is deterministic — once a board state repeats, it loops forever. Without detection, the server broadcasts identical diffs at 10 fps indefinitely.
 
-After each tick, the server computes an FNV-1a 32-bit hash of the alive/dead bit pattern (ignoring colors) and checks it against a rolling history of 64 generations. If the current hash matches one from N generations ago, a loop of period N is detected:
+After each tick, the server computes an FNV-1a 32-bit hash of the full visible board state (including colors) and checks it against a rolling history of 64 generations. Hash matches are confirmed by full-state byte comparison before they count as loops.
 
 - **Period 1** = static board (nothing changes)
 - **Period 2–64** = oscillators (blinkers, pulsars, etc.)
@@ -254,6 +270,8 @@ When a loop is detected:
 1. Tick interval jumps from 100ms to **2 seconds**
 2. Diff broadcasts are skipped when no cells changed
 3. Client displays "Static" or "Loop (period N) — tap the board to resume"
+
+Period-2 loops are intentionally stricter: they must repeat consistently for 10 confirmations before the server treats them as a real loop. That reduces transient false positives from boards that briefly revisit a prior state.
 
 Tapping the board calls `gol_tap_cell`, which clears the loop history and returns the tick rate to 100ms. The seed pattern introduces new live cells that break the cycle.
 

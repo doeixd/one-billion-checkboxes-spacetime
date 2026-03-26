@@ -70,8 +70,8 @@ spacetime start
 # Publish module
 spacetime publish <db-name> --module-path <module-path>
 
-# Clear and republish
-spacetime publish <db-name> --clear-database -y --module-path <module-path>
+# Clear and republish (SpacetimeDB 2.x CLI)
+spacetime publish <db-name> --delete-data always -y --module-path <module-path>
 
 # Generate client bindings
 spacetime generate --lang <lang> --out-dir <out> --module-path <module-path>
@@ -79,6 +79,57 @@ spacetime generate --lang <lang> --out-dir <out> --module-path <module-path>
 # View logs
 spacetime logs <db-name>
 ```
+
+### 2.0+ Publish Flow
+
+For this repo, the reliable release flow is:
+
+```bash
+spacetime build --module-path spacetimedb
+spacetime generate --lang typescript --out-dir src/module_bindings --module-path spacetimedb
+npm run build
+spacetime publish deni-x4u44 --server maincloud --module-path spacetimedb -y
+spacetime logs deni-x4u44 --server maincloud -n 40
+```
+
+Important repo-specific notes:
+- The module path is `spacetimedb`, not `server`
+- Current npm Spacetime scripts may be stale; prefer direct `spacetime ... --module-path spacetimedb` commands unless scripts are fixed
+- `spacetime generate` in 2.x uses `--module-path`, not `--project-path`
+- Publish to the configured maincloud database `deni-x4u44` unless explicitly told otherwise
+- `spacetime publish` hot-swaps compatible code/schema changes; only add `--break-clients` or `--delete-data on-conflict|always` if the publish plan requires it
+
+### 2.0 Automatic Migrations
+
+SpacetimeDB 2.x will automatically migrate compatible schema changes when republishing to an existing database.
+
+Safe additive changes include:
+- Adding new tables
+- Adding indexes
+- Adding new reducers
+- Removing `Unique` constraints
+- Changing tables from private to public
+
+Potentially breaking but publishable changes include:
+- Changing/removing reducers
+- Removing indexes
+- Changing tables from public to private
+- Adding columns at the end of a table **only if** they have default values
+
+Forbidden automatic migrations include:
+- Removing tables
+- Removing, renaming, reordering, or changing the type of existing columns
+- Adding columns without defaults
+- Adding columns in the middle of a table
+- Adding `Unique` or `Primary Key` constraints to existing data
+- Changing whether a table is scheduled
+
+Practical guidance for this repo:
+- Prefer additive migrations (new tables / new reducers) over mutating existing table layouts
+- When changing client/server sync protocols, strongly prefer adding new public tables and migrating the client, rather than changing existing table row shapes in place
+- Regenerate bindings after any schema change
+- Existing client connections usually stay up across publish, but scheduled reducers may briefly pause during module update
+- Use `--delete-data` only for development/test resets, not normal production publishes
 
 ---
 
@@ -90,6 +141,8 @@ spacetime logs <db-name>
 - Publishing to maincloud is free of charge
 - When publishing to maincloud the database dashboard will be at the url: https://spacetimedb.com/@<username>/<database-name>
 - The database owner can view utilization and performance metrics on the dashboard
+- For this repo, the live dashboard is `https://spacetimedb.com/deni-x4u44`
+- Check `spacetime login show` before publishing if ownership/auth is in doubt
 
 ---
 

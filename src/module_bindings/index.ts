@@ -47,10 +47,12 @@ import ToggleReducer from "./toggle_reducer";
 import CheckboxChangesRow from "./checkbox_changes_table";
 import CheckboxesRow from "./checkboxes_table";
 import GolDiffRow from "./gol_diff_table";
+import GolDiffV2Row from "./gol_diff_v_2_table";
 import GolGridRow from "./gol_grid_table";
 import GolLoopStatusRow from "./gol_loop_status_table";
 import GolMetaRow from "./gol_meta_table";
 import GolRowChunkRow from "./gol_row_chunk_table";
+import GolSyncRow from "./gol_sync_table";
 import StatsRow from "./stats_table";
 
 /** Type-only namespace exports for generated type groups. */
@@ -90,6 +92,17 @@ const tablesSchema = __schema({
       { name: 'gol_diff_id_key', constraint: 'unique', columns: ['id'] },
     ],
   }, GolDiffRow),
+  golDiffV2: __table({
+    name: 'gol_diff_v2',
+    indexes: [
+      { accessor: 'id', name: 'gol_diff_v2_id_idx_btree', algorithm: 'btree', columns: [
+        'id',
+      ] },
+    ],
+    constraints: [
+      { name: 'gol_diff_v2_id_key', constraint: 'unique', columns: ['id'] },
+    ],
+  }, GolDiffV2Row),
   golGrid: __table({
     name: 'gol_grid',
     indexes: [
@@ -134,6 +147,17 @@ const tablesSchema = __schema({
       { name: 'gol_row_chunk_row_idx_key', constraint: 'unique', columns: ['rowIdx'] },
     ],
   }, GolRowChunkRow),
+  golSync: __table({
+    name: 'gol_sync',
+    indexes: [
+      { accessor: 'id', name: 'gol_sync_id_idx_btree', algorithm: 'btree', columns: [
+        'id',
+      ] },
+    ],
+    constraints: [
+      { name: 'gol_sync_id_key', constraint: 'unique', columns: ['id'] },
+    ],
+  }, GolSyncRow),
   stats: __table({
     name: 'stats',
     indexes: [
