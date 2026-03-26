@@ -121,9 +121,9 @@ The `stats` table (one row, always subscribed) holds `totalColored`. It's recalc
 
 | Layer | Full state | Diff | Reduction |
 |-------|-----------|------|-----------|
-| Checkboxes (server → client) | 2,000 B/row | 24 B/event | ~83x |
-| GOL (server → client) | 1,250 B/snapshot | ~150 B/tick typical | ~8x |
-| Stats (server → client) | Scan every 15s | Client-side delta | Avoids hot row |
+| Checkboxes (server -> client) | 2,000 B/row | 24 B/event | ~83x |
+| GOL (server -> client) | 1,250 B/snapshot | diff log + sync per tick | snapshot avoided on hot path |
+| Stats (server -> client) | Scan every 15s | Client-side delta | Avoids hot row |
 | DOM (client) | Re-render all cells | Solid updates 1 node | O(1) per change |
 
 
@@ -263,9 +263,9 @@ If a reducer call does make it through but the server rejects it (e.g., another 
 
 The `/life` route hosts a 50×50 multiplayer Conway's Game of Life.
 
-- **Tap to seed**: Stamps a cross-shaped (+) pattern in your color (deterministic from identity)
+- **Tap to seed**: Stamps a cross-shaped (+) pattern plus a couple of random nearby sprouts in your color
 - **Color inheritance**: Born cells inherit color from a random living neighbor (seeded PRNG)
-- **Versioned handoff**: Bootstrap from row snapshots, then switch to versioned live diffs
+- **Versioned handoff**: Bootstrap from `gol_bootstrap`, then replay `gol_diff_log`
 
 ### Zero-Allocation Tick Loop
 
@@ -277,7 +277,7 @@ const _golNextBuf    = new Uint8Array(2500);   // next generation
 const _golDiffBuf    = new Uint8Array(7500);   // worst-case diff (3 bytes × 2500 cells)
 ```
 
-Each tick: compute next generation → build cell-level diff into `_golDiffBuf` → write a single live diff row → update only the changed `golRowChunk` rows for bootstrap correctness → copy next into current. Taps also increment the board version, so client sync correctness does not depend on generation changes alone.
+Each tick: compute next generation → build cell-level diff into `_golDiffBuf` → append one `gol_diff_log` row → update the authoritative snapshot rows (`gol_grid`, `gol_bootstrap`) → copy next into current. Taps also increment the board version, so client sync correctness does not depend on generation changes alone.
 
 The diff encoding is packed `[x, y, color]` triples — 3 bytes per changed cell. A typical tick costs ~150 bytes vs. 1,250 for a full snapshot (~8x reduction). The client unpacks and applies each triple as a single SolidJS store write:
 
@@ -290,10 +290,11 @@ for (let i = 0; i + 2 < diff.data.length; i += 3) {
 
 ### Bootstrap, Diffs, and Versioning
 
-The GOL client uses a two-step sync path:
+The GOL client uses a staged sync path:
 
-1. Subscribe to `gol_row_chunk` + `gol_sync` and build a full 50x50 snapshot.
-2. Switch to `gol_diff_v2`, where every diff row also carries a monotonic `version`.
+1. Subscribe to `gol_bootstrap` and wait for the full atomic snapshot to land in the local cache.
+2. Subscribe to `gol_diff_log WHERE version > snapshot.version` plus `gol_sync`.
+3. Re-read `gol_bootstrap` inside phase 2 `onApplied`, render that as the authoritative first frame, then replay pending diffs in strict version order.
 
 `gol_sync` stores both `generation` and `version`:
 
@@ -302,25 +303,26 @@ The GOL client uses a two-step sync path:
 
 That distinction matters because a tap changes the board immediately without advancing the simulation. Using `version` lets the client detect gaps or stale handoffs and re-bootstrap if needed.
 
-The older `gol_diff` table is still written for backward compatibility, but the current client uses `gol_diff_v2`.
+The older `gol_diff` and `gol_diff_v2` tables are still written for compatibility/debugging, but the current client uses `gol_bootstrap` + `gol_diff_log`.
 
-### Loop Detection and Pausing
+### Resync and Recovery
 
-Conway's Game of Life is deterministic — once a board state repeats, it loops forever. Without detection, the server broadcasts identical diffs at 10 fps indefinitely.
+- The client treats version gaps as fatal and resubscribes from snapshot.
+- A periodic full resync runs every 20 seconds as a safety net.
+- `gol_bootstrap.cells` is validated client-side before use; malformed snapshots trigger resync.
+- The server hydrates new snapshot tables from existing state after publish so republishing does not zero the visible board.
 
-After each tick, the server computes an FNV-1a 32-bit hash of the full visible board state (including colors) and checks it against a rolling history of 64 generations. Hash matches are confirmed by full-state byte comparison before they count as loops.
+This matters because a cell can change during bootstrap and then become static. If the client misses the one diff that created it, that cell can stay wrong forever. The append-only `gol_diff_log` plus strict version replay avoids that class of bug.
 
-- **Period 1** = static board (nothing changes)
-- **Period 2–64** = oscillators (blinkers, pulsars, etc.)
+### Checkbox handoff
 
-When a loop is detected:
-1. Tick interval jumps from 100ms to **2 seconds**
-2. Diff broadcasts are skipped when no cells changed
-3. Client displays "Static" or "Loop (period N) — tap the board to resume"
+Checkboxes use the same two-phase idea in a range-scoped form:
 
-Period-2 loops are intentionally stricter: they must repeat consistently for 10 confirmations before the server treats them as a real loop. That reduces transient false positives from boards that briefly revisit a prior state.
+1. Subscribe to `checkboxes` for the visible document range plus `checkbox_sync`.
+2. Read `checkbox_sync.latest_change_id` from the cache in `onApplied`.
+3. Switch to `checkbox_changes` with `id > latest_change_id` for that range.
 
-Tapping the board calls `gol_tap_cell`, which clears the loop history and returns the tick rate to 100ms. The seed pattern introduces new live cells that break the cycle.
+This prevents old retained `checkbox_changes` rows from being replayed onto already-current checkbox documents during range changes or refreshes.
 
 
 ## Stack
