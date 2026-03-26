@@ -14,7 +14,10 @@
  *   states, and accessibility come free from real elements.
  */
 import {
+  action,
   createSignal,
+  createOptimistic,
+  createOptimisticStore,
   createStore,
   createMemo,
   createEffect,
@@ -28,8 +31,9 @@ import {
 import "./app.css";
 import { conn, isConnected } from "./main.tsx";
 import type { EventContext } from "./module_bindings/index.ts";
-import type { SubscriptionHandle } from "./module_bindings/index.ts";
 import type { Checkboxes, CheckboxChanges, Stats } from "./module_bindings/types.ts";
+import { checkboxRangeStream, type CheckboxDocRange, type CheckboxRangePhase } from "./lib/checkbox-stream.ts";
+import { createCheckboxStateController } from "./lib/checkbox-state.ts";
 
 // ─── Constants ────────────────────────────────────────────────────────────────
 
@@ -37,7 +41,8 @@ const NUM_BOXES = 1_000_000_000;
 const NUM_DOCUMENTS = 250_000;
 const CELL_SIZE = 22; // px
 const OVERSCAN = 3; // extra rows above/below viewport
-const MAX_SCROLL_HEIGHT = 32_000_000; // px — under Chrome's ~33.5M cap
+const MAX_SCROLL_HEIGHT = 35_500_000; // px — exceeds Chrome's usual safe range; may clamp in some browsers
+const SUBSCRIPTION_BUFFER_VIEWPORTS = 3; // subscribe beyond the viewport for smoother fast scrolling
 
 const PALETTE: string[] = [
   "#f3f4f6", // 0: clear / uncheck
@@ -65,15 +70,6 @@ function getColor(boxes: ArrayLike<number>, arrayIdx: number): number {
   return arrayIdx % 2 === 0 ? byte & 0x0f : (byte >> 4) & 0x0f;
 }
 
-/** Apply a nibble change to a byte array in-place. */
-function setColorLocal(boxes: Uint8Array, arrayIdx: number, color: number): void {
-  const byteIdx = Math.floor(arrayIdx / 2);
-  const byte = boxes[byteIdx] || 0;
-  boxes[byteIdx] = arrayIdx % 2 === 0
-    ? (byte & 0xf0) | (color & 0x0f)
-    : (byte & 0x0f) | ((color & 0x0f) << 4);
-}
-
 // ─── Component ────────────────────────────────────────────────────────────────
 
 export default function App() {
@@ -86,7 +82,7 @@ export default function App() {
   const rawBoxes: Record<number, Uint8Array> = {};
 
   const [totalColored, setTotalColored] = createSignal(0n);
-  const [pendingCountDelta, setPendingCountDelta] = createSignal(0);
+  const [pendingCountDelta, setPendingCountDelta] = createOptimistic(0);
   const [statsReady, setStatsReady] = createSignal(false);
 
   // ── Async subscription + grid readiness ──────────────────────────────
@@ -97,23 +93,21 @@ export default function App() {
   });
 
   const [containerMeasured, setContainerMeasured] = createSignal(false);
+  const [syncPhase, setSyncPhase] = createSignal<CheckboxRangePhase>("syncing");
+  const [activeRange, setActiveRange] = createSignal<CheckboxDocRange | null>(null);
 
   const gridReady = createMemo(async () => {
     await subscriptionPromise;
     return true as const;
   });
 
-  const isSyncing = () => isPending(() => gridReady());
+  const isSyncing = () => syncPhase() !== "live" || isPending(() => gridReady());
 
   // ── Viewport-scoped subscription ────────────────────────────────────
-  let currentSubHandle: SubscriptionHandle | null = null;
-  let subscribedMin = -1;
-  let subscribedMax = -1;
   let subDebounceTimer = 0;
-  let subGeneration = 0; // monotonic counter to detect stale callbacks
 
   // ── Pending optimistic writes ─────────────────────────────────────────
-  const [pendingStore, setPendingStore] = createStore<Record<number, Record<number, number>>>({});
+  const [pendingStore, setPendingStore] = createOptimisticStore<Record<number, Record<number, number>>>({});
 
   // ── Round-trip timing ─────────────────────────────────────────────────
   // Keyed by "docIdx:arrayIdx" so foreign change events (other users clicking
@@ -123,8 +117,19 @@ export default function App() {
   const [lastRoundTripMs, setLastRoundTripMs] = createSignal<number | null>(
     null,
   );
-  let roundTripFadeTimer = 0;
   let inflightGcTimer = 0;
+
+  const checkboxState = createCheckboxStateController({
+    rawBoxes,
+    pendingStore,
+    setBoxesStore,
+    setPendingStore,
+    inflightCells,
+    setPendingToggleCount,
+    setLastRoundTripMs,
+    setTotalColored,
+    setPendingCountDelta,
+  });
 
   /** Periodically clear stale inflight cells (safety net for missed events). */
   const INFLIGHT_STALE_MS = 8000;
@@ -236,123 +241,63 @@ export default function App() {
     onCleanup(() => {
       obs.disconnect();
       cancelAnimationFrame(rafId);
-      clearTimeout(roundTripFadeTimer);
       clearTimeout(subDebounceTimer);
       clearTimeout(inflightGcTimer);
       clearTimeout(urlUpdateTimer);
-      if (currentSubHandle && !currentSubHandle.isEnded()) {
-        currentSubHandle.unsubscribe();
-      }
-      if (phase1Handle && !phase1Handle.isEnded()) {
-        phase1Handle.unsubscribe();
-      }
+      checkboxState.cleanup();
     });
 
-    // SpacetimeDB event handlers — checkboxes (full doc updates during Phase 1).
-    // Change event handlers resolve per-cell first; this is the fallback that
-    // catches anything remaining (e.g., if change events haven't arrived yet).
-    const upsertRow = (row: Checkboxes) => {
-      rawBoxes[row.idx] = row.boxes;
-      setBoxesStore(s => { s[row.idx] = row.boxes; });
-
-      // Fallback: clear any remaining pending entries for this document
-      if (pendingStore[row.idx]) {
-        setPendingStore(s => { delete s[row.idx]; });
-      }
-
-      // Fallback: resolve any remaining inflight cells for this document
-      const prefix = `${row.idx}:`;
-      for (const [key, inflight] of inflightCells) {
-        if (key.startsWith(prefix)) {
-          inflightCells.delete(key);
-          const ms = Math.round(performance.now() - inflight.time);
-          setLastRoundTripMs(ms);
-          setPendingToggleCount((c) => Math.max(0, c - inflight.count));
-          clearTimeout(roundTripFadeTimer);
-          roundTripFadeTimer = window.setTimeout(
-            () => setLastRoundTripMs(null),
-            2000,
-          );
-        }
-      }
+    const handleCheckboxInsert = (_ctx: EventContext, row: Checkboxes) => {
+      checkboxState.upsertRow(row);
     };
+    const handleCheckboxUpdate = (_ctx: EventContext, _old: Checkboxes, row: Checkboxes) => {
+      checkboxState.upsertRow(row);
+    };
+    const handleCheckboxDelete = (_ctx: EventContext, _row: Checkboxes) => {};
 
-    conn.db.checkboxes.onInsert((_ctx: EventContext, row: Checkboxes) =>
-      upsertRow(row),
-    );
-    conn.db.checkboxes.onUpdate(
-      (_ctx: EventContext, _old: Checkboxes, row: Checkboxes) => upsertRow(row),
-    );
+    conn.db.checkboxes.onInsert(handleCheckboxInsert);
+    conn.db.checkboxes.onUpdate(handleCheckboxUpdate);
 
     // When unsubscribing from full docs (Phase 2), SpacetimeDB fires onDelete
     // for every row leaving the subscription. We keep boxesStore intact —
     // change events will keep it current. Memory cost is trivial (~2KB/doc).
-    conn.db.checkboxes.onDelete((_ctx: EventContext, _row: Checkboxes) => {});
+    conn.db.checkboxes.onDelete(handleCheckboxDelete);
 
     // SpacetimeDB event handlers — lightweight change events
-    conn.db.checkboxChanges.onInsert((_ctx: EventContext, change: CheckboxChanges) => {
-      const { documentIdx, arrayIdx, color } = change;
-      // Apply nibble delta to the raw (non-Proxy) Uint8Array, then sync
-      // a fresh copy to the SolidJS store for reactivity.
-      const existing = rawBoxes[documentIdx];
-      if (existing) {
-        setColorLocal(existing, arrayIdx, color);
-        setBoxesStore(s => { s[documentIdx] = new Uint8Array(existing); });
-      } else {
-        // Document was lazily created by this toggle — not in boxesStore yet
-        const boxes = new Uint8Array(2000);
-        setColorLocal(boxes, arrayIdx, color);
-        rawBoxes[documentIdx] = boxes;
-        setBoxesStore(s => { s[documentIdx] = new Uint8Array(boxes); });
-      }
+    const handleCheckboxChangeInsert = (_ctx: EventContext, change: CheckboxChanges) => {
+      checkboxState.applyChange(change);
+    };
+    const handleCheckboxChangeDelete = (_ctx: EventContext, _change: CheckboxChanges) => {};
 
-      // Clear pending overlay for this specific cell
-      if (pendingStore[documentIdx]?.[arrayIdx] !== undefined) {
-        setPendingStore(s => {
-          if (s[documentIdx]) {
-            delete s[documentIdx][arrayIdx];
-            if (Object.keys(s[documentIdx]).length === 0) {
-              delete s[documentIdx];
-            }
-          }
-        });
-      }
-
-      // Resolve inflight timing — keyed per-cell so foreign users' change
-      // events on the same document don't steal our inflight counts.
-      const cellKey = `${documentIdx}:${arrayIdx}`;
-      const inflight = inflightCells.get(cellKey);
-      if (inflight) {
-        const newCount = inflight.count - 1;
-        if (newCount <= 0) {
-          inflightCells.delete(cellKey);
-          const ms = Math.round(performance.now() - inflight.time);
-          setLastRoundTripMs(ms);
-          setPendingToggleCount((c) => Math.max(0, c - 1));
-          clearTimeout(roundTripFadeTimer);
-          roundTripFadeTimer = window.setTimeout(() => setLastRoundTripMs(null), 2000);
-        } else {
-          inflightCells.set(cellKey, { ...inflight, count: newCount });
-          setPendingToggleCount((c) => Math.max(0, c - 1));
-        }
-      }
-    });
+    conn.db.checkboxChanges.onInsert(handleCheckboxChangeInsert);
 
     // Pruned change events — no action needed
-    conn.db.checkboxChanges.onDelete((_ctx: EventContext, _change: CheckboxChanges) => {});
+    conn.db.checkboxChanges.onDelete(handleCheckboxChangeDelete);
 
     // SpacetimeDB event handlers — stats (global colored count)
-    const upsertStats = (row: Stats) => {
-      setTotalColored(row.totalColored);
-      setPendingCountDelta(0); // server ground truth resets optimistic delta
-    };
-    conn.db.stats.onInsert((_ctx: EventContext, row: Stats) => upsertStats(row));
-    conn.db.stats.onUpdate((_ctx: EventContext, _old: Stats, row: Stats) => upsertStats(row));
+    const handleStatsInsert = (_ctx: EventContext, row: Stats) => checkboxState.upsertStats(row);
+    const handleStatsUpdate = (_ctx: EventContext, _old: Stats, row: Stats) => checkboxState.upsertStats(row);
+
+    conn.db.stats.onInsert(handleStatsInsert);
+    conn.db.stats.onUpdate(handleStatsUpdate);
 
     // Permanent subscription to stats (tiny — single row)
-    conn.subscriptionBuilder()
+    const statsHandle = conn.subscriptionBuilder()
       .onApplied(() => setStatsReady(true))
       .subscribe("SELECT * FROM stats");
+
+    onCleanup(() => {
+      conn.db.checkboxes.removeOnInsert(handleCheckboxInsert);
+      conn.db.checkboxes.removeOnUpdate(handleCheckboxUpdate);
+      conn.db.checkboxes.removeOnDelete(handleCheckboxDelete);
+      conn.db.checkboxChanges.removeOnInsert(handleCheckboxChangeInsert);
+      conn.db.checkboxChanges.removeOnDelete(handleCheckboxChangeDelete);
+      conn.db.stats.removeOnInsert(handleStatsInsert);
+      conn.db.stats.removeOnUpdate(handleStatsUpdate);
+      try {
+        if (!statsHandle.isEnded()) statsHandle.unsubscribe();
+      } catch {}
+    });
   });
 
   // ── Derived scroll values ─────────────────────────────────────────────
@@ -401,7 +346,7 @@ export default function App() {
     if (cols <= 0) return null;
 
     const visibleRows = poolRows();
-    const bufferRows = visibleRows * 2; // 2x viewport buffer
+    const bufferRows = visibleRows * SUBSCRIPTION_BUFFER_VIEWPORTS;
     const firstRow = Math.max(0, startRow() - bufferRows);
     const lastRow = Math.min(numRows() - 1, startRow() + visibleRows + bufferRows);
 
@@ -418,110 +363,25 @@ export default function App() {
     return { min: minDoc, max: maxDoc, wraps: maxDoc < minDoc };
   };
 
-  /** Check if a doc index falls within the currently subscribed range. */
-  const isInSubscribedRange = (docIdx: number) => {
-    if (subscribedMin === -1) return false;
-    if (subscribedMax < subscribedMin) {
+  /** Check if a doc index falls within the currently active range. */
+  const isInActiveRange = (docIdx: number) => {
+    const range = activeRange();
+    if (!range) return false;
+    if (range.max < range.min) {
       // wraps around
-      return docIdx >= subscribedMin || docIdx <= subscribedMax;
+      return docIdx >= range.min || docIdx <= range.max;
     }
-    return docIdx >= subscribedMin && docIdx <= subscribedMax;
+    return docIdx >= range.min && docIdx <= range.max;
   };
 
-  /** Build change-event-only queries for a document range. */
-  // SQL uses snake_case column names (document_idx), not the camelCase from generated types.
-  const changeQueries = (range: { min: number; max: number; wraps: boolean }) =>
-    range.wraps
-      ? [
-          `SELECT * FROM checkbox_changes WHERE document_idx >= ${range.min}`,
-          `SELECT * FROM checkbox_changes WHERE document_idx <= ${range.max}`,
-        ]
-      : [`SELECT * FROM checkbox_changes WHERE document_idx >= ${range.min} AND document_idx <= ${range.max}`];
-
-  /**
-   * Two-phase subscription for a document range (no table overlap).
-   *
-   * Phase 1: Subscribe to full checkboxes rows ONLY.
-   *          Once onApplied fires, boxesStore has all docs for this range.
-   *
-   * Phase 2: Subscribe to checkbox_changes ONLY, then drop Phase 1.
-   *          Live updates cost ~24 bytes instead of ~2KB. No subscription
-   *          overlap (different tables) → exactly 1 message per toggle.
-   */
-  let phase1Handle: SubscriptionHandle | null = null;
-
-  /** Safely unsubscribe a handle, ignoring already-ended handles. */
-  const safeUnsub = (h: SubscriptionHandle | null) => {
-    if (!h) return;
-    try { if (!h.isEnded()) h.unsubscribe(); } catch { /* already ended */ }
-  };
-
-  const subscribeToRange = (range: { min: number; max: number; wraps: boolean }) => {
-    const fullQueries = range.wraps
-      ? [
-          `SELECT * FROM checkboxes WHERE idx >= ${range.min}`,
-          `SELECT * FROM checkboxes WHERE idx <= ${range.max}`,
-        ]
-      : [`SELECT * FROM checkboxes WHERE idx >= ${range.min} AND idx <= ${range.max}`];
-
-    // Bump generation so stale onApplied callbacks become no-ops
-    const gen = ++subGeneration;
-
-    // Collect ALL handles that need cleanup (Set deduplicates)
-    const toCleanup = new Set<SubscriptionHandle>();
-    if (currentSubHandle) toCleanup.add(currentSubHandle);
-    if (phase1Handle) toCleanup.add(phase1Handle);
-
-    // Phase 1: full docs ONLY (no checkbox_changes — avoids subscription
-    // overlap that causes duplicate messages when Phase 2 also covers changes)
-    const p1Handle = conn
-      .subscriptionBuilder()
-      .onApplied(() => {
-        // Stale callback — a newer subscribeToRange already took over
-        if (gen !== subGeneration) {
-          safeUnsub(p1Handle);
-          return;
-        }
-
-        // Clean up all previous handles
-        for (const h of toCleanup) safeUnsub(h);
-
-        if (!subscriptionResolved) {
-          subscriptionResolved = true;
-          resolveSubscription();
-        }
-
-        // Phase 2: change events only — lightweight live updates (24 bytes
-        // instead of 2KB). No overlap with Phase 1 (different tables).
-        currentSubHandle = conn
-          .subscriptionBuilder()
-          .onApplied(() => {
-            // Stale — a newer subscribeToRange already took over
-            if (gen !== subGeneration) return;
-            // Phase 2 is live — drop Phase 1 (full docs)
-            safeUnsub(p1Handle);
-            if (phase1Handle === p1Handle) phase1Handle = null;
-          })
-          .subscribe(changeQueries(range));
-      })
-      .subscribe(fullQueries);
-
-    phase1Handle = p1Handle;
-    subscribedMin = range.min;
-    subscribedMax = range.max;
-  };
-
-  // Reset subscription state on disconnect so reconnect triggers a fresh Phase 1.
-  // Without this, subscribedMin/Max retain stale values and isInSubscribedRange
-  // would prevent re-subscribing even though the old handles are dead.
+  // Reset subscription state on disconnect so reconnect triggers a fresh
+  // bootstrap for the next visible range.
   createEffect(
     () => isConnected(),
     (connected) => {
       if (!connected) {
-        subscribedMin = -1;
-        subscribedMax = -1;
-        currentSubHandle = null;
-        phase1Handle = null;
+        setActiveRange(null);
+        setSyncPhase("syncing");
       }
     },
   );
@@ -532,14 +392,16 @@ export default function App() {
     ({ range, connected }) => {
       if (!range || !connected) return;
 
+      const current = activeRange();
+
       // First subscription or reconnect — immediate
-      if (subscribedMin === -1) {
-        subscribeToRange(range);
+      if (!current) {
+        setActiveRange(range);
         return;
       }
 
-      // Only resubscribe if visible edge has moved outside subscribed range
-      if (isInSubscribedRange(range.min) && isInSubscribedRange(range.max)) {
+      // Only resubscribe if visible edge has moved outside active range
+      if (isInActiveRange(range.min) && isInActiveRange(range.max)) {
         return;
       }
 
@@ -547,8 +409,47 @@ export default function App() {
       clearTimeout(subDebounceTimer);
       subDebounceTimer = window.setTimeout(() => {
         const fresh = visibleDocRange();
-        if (fresh) subscribeToRange(fresh);
+        if (fresh) setActiveRange(fresh);
       }, 200);
+    },
+  );
+
+  createEffect(
+    () => ({ range: activeRange(), connected: isConnected() }),
+    ({ range, connected }) => {
+      if (!range || !connected) return;
+
+      const abortController = new AbortController();
+
+      void (async () => {
+        try {
+          for await (const event of checkboxRangeStream({
+            conn,
+            range,
+            signal: abortController.signal,
+          })) {
+            switch (event.kind) {
+              case "phase":
+                setSyncPhase(event.phase);
+                break;
+              case "snapshot-ready":
+                if (!subscriptionResolved) {
+                  subscriptionResolved = true;
+                  resolveSubscription();
+                }
+                break;
+            }
+          }
+        } catch (error) {
+          if (!abortController.signal.aborted) {
+            console.error("Checkbox range stream failed:", error);
+          }
+        }
+      })();
+
+      return () => {
+        abortController.abort();
+      };
     },
   );
 
@@ -636,12 +537,53 @@ export default function App() {
     setPendingToggleCount((c) => c + 1);
     if (!inflightGcTimer) inflightGcTimer = window.setTimeout(gcInflightCells, 2000);
 
-    conn.reducers.toggle({ documentIdx, arrayIdx, color: newColor }).catch(() => {
+    void submitToggle({
+      documentIdx,
+      arrayIdx,
+      color: newColor,
+      previousColor: currentColor,
+    });
+  };
+
+  const submitToggle = action(async function* (payload: {
+    documentIdx: number;
+    arrayIdx: number;
+    color: number;
+    previousColor: number;
+  }) {
+    const { documentIdx, arrayIdx, color, previousColor } = payload;
+    try {
+      await conn.reducers.toggle({ documentIdx, arrayIdx, color });
+      yield;
+    } catch {
+      const cellKey = `${documentIdx}:${arrayIdx}`;
+      const inflight = inflightCells.get(cellKey);
+      if (inflight) {
+        const nextCount = inflight.count - 1;
+        setPendingToggleCount((c) => Math.max(0, c - 1));
+        if (nextCount <= 0) {
+          inflightCells.delete(cellKey);
+          if (pendingStore[documentIdx]?.[arrayIdx] === color) {
+            setPendingStore((s) => {
+              if (!s[documentIdx]) return;
+              delete s[documentIdx][arrayIdx];
+              if (Object.keys(s[documentIdx]).length === 0) delete s[documentIdx];
+            });
+          }
+          const wasColored = previousColor > 0;
+          const isColored = color > 0;
+          if (wasColored !== isColored) {
+            setPendingCountDelta((d) => d - (isColored ? 1 : -1));
+          }
+        } else {
+          inflightCells.set(cellKey, { ...inflight, count: nextCount });
+        }
+      }
       setRateLimited(true);
       clearTimeout(rateLimitFadeTimer);
       rateLimitFadeTimer = window.setTimeout(() => setRateLimited(false), 2000);
-    });
-  };
+    }
+  });
 
   // ─────────────────────────────────────────────────────────────────────────
   // Render

@@ -127,6 +127,53 @@ The `stats` table (one row, always subscribed) holds `totalColored`. It's recalc
 | DOM (client) | Re-render all cells | Solid updates 1 node | O(1) per change |
 
 
+## Solid 2.0 Showcase Architecture
+
+This repo is intentionally leaning into **Solid 2.0's native async model**, not just using Solid as a fast renderer.
+
+### Async reads as streams
+
+Instead of keeping all subscription choreography inline inside components, the app now wraps staged SpacetimeDB sync flows as **domain async streams**:
+
+- `src/lib/checkbox-stream.ts` — visible-range checkbox bootstrap -> live diff handoff
+- `src/lib/gol-stream.ts` — Game of Life snapshot -> versioned diff -> resync flow
+- `src/lib/streams.ts` — small async queue/stream helpers used by both
+
+Components consume those streams and let Solid 2.0 handle the UI phases:
+
+- **`<Loading>`** handles initial readiness
+- **`isPending(...)`** reflects background resubscribe / revalidation work
+- **split effects** keep side effects separate from tracked computation
+
+This is the Solid 2.0 idea in practice: realtime subscriptions are treated as async computations, not as a pile of ad hoc callback setup.
+
+### Async writes as actions + optimistic state
+
+The checkbox interaction path also now uses Solid 2.0's newer mutation primitives:
+
+- `action(...)` wraps the async reducer call
+- `createOptimistic(...)` holds the temporary optimistic count delta
+- `createOptimisticStore(...)` holds the temporary per-cell overlay state
+
+Server subscriptions remain the source of truth. The optimistic layer only fills the gap between click and authoritative diff arrival.
+
+### Projection-style client state folding
+
+SpacetimeDB sends row snapshots and tiny diff events; the client folds those into UI state in a dedicated helper:
+
+- `src/lib/checkbox-state.ts`
+
+That helper owns the logic for:
+
+- applying full row snapshots
+- applying nibble-level diff events
+- clearing optimistic overlays when authoritative updates arrive
+- resolving per-cell round-trip timing
+- reconciling server stats with optimistic local counts
+
+This keeps `src/App.tsx` focused on Solid reactivity, viewport math, and rendering instead of low-level event bookkeeping.
+
+
 ## DOM Reuse and Solid 2.0 Reactivity
 
 1 billion checkboxes at 22px each would be a 484km tall page — far beyond any browser's maximum scrollable height (~33M pixels in Chrome). Instead, a **fixed pool** of ~300 DOM elements covers the viewport + 3 rows of overscan.
@@ -172,7 +219,7 @@ For the Game of Life at 10 fps, this means each `[x, y, color]` triple from a di
 
 ### Optimistic Updates
 
-Toggle → update `pendingStore` overlay immediately → call reducer → when the change event arrives back, clear the pending entry. Round-trip time is tracked per-cell and displayed in the UI.
+Toggle -> update optimistic overlays immediately -> run a Solid 2.0 `action(...)` -> let the SpacetimeDB change event reconcile the final state. Round-trip time is tracked per-cell and displayed in the UI.
 
 
 ## Rate Limiting and Fingerprinting
