@@ -41,7 +41,7 @@ const NUM_BOXES = 1_000_000_000;
 const NUM_DOCUMENTS = 250_000;
 const CELL_SIZE = 22; // px
 const OVERSCAN = 3; // extra rows above/below viewport
-const MAX_SCROLL_HEIGHT = 35_500_000; // px — exceeds Chrome's usual safe range; may clamp in some browsers
+const MAX_SCROLL_HEIGHT = 33_500_000; // px — near Chrome's practical ceiling
 const SUBSCRIPTION_BUFFER_VIEWPORTS = 3; // subscribe beyond the viewport for smoother fast scrolling
 
 const PALETTE: string[] = [
