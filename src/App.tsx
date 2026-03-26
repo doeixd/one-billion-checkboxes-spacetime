@@ -41,7 +41,7 @@ const NUM_BOXES = 1_000_000_000;
 const NUM_DOCUMENTS = 250_000;
 const CELL_SIZE = 22; // px
 const OVERSCAN = 3; // extra rows above/below viewport
-const MAX_SCROLL_HEIGHT = 33_500_000; // px — near Chrome's practical ceiling
+const MAX_SCROLL_HEIGHT = 32_000_000; // px — comfortably under Chrome's practical ceiling
 const SUBSCRIPTION_BUFFER_VIEWPORTS = 3; // subscribe beyond the viewport for smoother fast scrolling
 
 const PALETTE: string[] = [
@@ -130,6 +130,33 @@ export default function App() {
     setTotalColored,
     setPendingCountDelta,
   });
+
+  const rangeContainsDoc = (range: CheckboxDocRange, docIdx: number) =>
+    range.wraps
+      ? docIdx >= range.min || docIdx <= range.max
+      : docIdx >= range.min && docIdx <= range.max;
+
+  const applyRangeSnapshot = (range: CheckboxDocRange) => {
+    const seen = new Set<number>();
+
+    for (const row of conn.db.checkboxes.iter()) {
+      if (!rangeContainsDoc(range, row.idx)) continue;
+      seen.add(row.idx);
+      checkboxState.upsertRow(row);
+    }
+
+    for (const key of Object.keys(rawBoxes)) {
+      const docIdx = Number(key);
+      if (!rangeContainsDoc(range, docIdx) || seen.has(docIdx)) continue;
+      delete rawBoxes[docIdx];
+      setBoxesStore(s => {
+        delete s[docIdx];
+      });
+      setPendingStore(s => {
+        delete s[docIdx];
+      });
+    }
+  };
 
   /** Periodically clear stale inflight cells (safety net for missed events). */
   const INFLIGHT_STALE_MS = 8000;
@@ -433,6 +460,7 @@ export default function App() {
                 setSyncPhase(event.phase);
                 break;
               case "snapshot-ready":
+                applyRangeSnapshot(event.range);
                 if (!subscriptionResolved) {
                   subscriptionResolved = true;
                   resolveSubscription();

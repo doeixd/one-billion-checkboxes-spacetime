@@ -45,8 +45,11 @@ import ToggleReducer from "./toggle_reducer";
 
 // Import all table schema definitions
 import CheckboxChangesRow from "./checkbox_changes_table";
+import CheckboxSyncRow from "./checkbox_sync_table";
 import CheckboxesRow from "./checkboxes_table";
+import GolBootstrapRow from "./gol_bootstrap_table";
 import GolDiffRow from "./gol_diff_table";
+import GolDiffLogRow from "./gol_diff_log_table";
 import GolDiffV2Row from "./gol_diff_v_2_table";
 import GolGridRow from "./gol_grid_table";
 import GolLoopStatusRow from "./gol_loop_status_table";
@@ -70,6 +73,17 @@ const tablesSchema = __schema({
       { name: 'checkbox_changes_id_key', constraint: 'unique', columns: ['id'] },
     ],
   }, CheckboxChangesRow),
+  checkboxSync: __table({
+    name: 'checkbox_sync',
+    indexes: [
+      { accessor: 'id', name: 'checkbox_sync_id_idx_btree', algorithm: 'btree', columns: [
+        'id',
+      ] },
+    ],
+    constraints: [
+      { name: 'checkbox_sync_id_key', constraint: 'unique', columns: ['id'] },
+    ],
+  }, CheckboxSyncRow),
   checkboxes: __table({
     name: 'checkboxes',
     indexes: [
@@ -81,6 +95,17 @@ const tablesSchema = __schema({
       { name: 'checkboxes_idx_key', constraint: 'unique', columns: ['idx'] },
     ],
   }, CheckboxesRow),
+  golBootstrap: __table({
+    name: 'gol_bootstrap',
+    indexes: [
+      { accessor: 'id', name: 'gol_bootstrap_id_idx_btree', algorithm: 'btree', columns: [
+        'id',
+      ] },
+    ],
+    constraints: [
+      { name: 'gol_bootstrap_id_key', constraint: 'unique', columns: ['id'] },
+    ],
+  }, GolBootstrapRow),
   golDiff: __table({
     name: 'gol_diff',
     indexes: [
@@ -92,6 +117,17 @@ const tablesSchema = __schema({
       { name: 'gol_diff_id_key', constraint: 'unique', columns: ['id'] },
     ],
   }, GolDiffRow),
+  golDiffLog: __table({
+    name: 'gol_diff_log',
+    indexes: [
+      { accessor: 'version', name: 'gol_diff_log_version_idx_btree', algorithm: 'btree', columns: [
+        'version',
+      ] },
+    ],
+    constraints: [
+      { name: 'gol_diff_log_version_key', constraint: 'unique', columns: ['version'] },
+    ],
+  }, GolDiffLogRow),
   golDiffV2: __table({
     name: 'gol_diff_v2',
     indexes: [

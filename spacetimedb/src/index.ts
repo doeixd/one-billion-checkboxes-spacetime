@@ -30,8 +30,9 @@ const GOL_COLS = 50;
 const GOL_ROWS = 50;
 const GOL_CELL_COUNT = GOL_COLS * GOL_ROWS; // 2500
 const GOL_CHUNK_BYTES = GOL_COLS / 2;       // 25 bytes per row (nibble-packed)
-const GOL_TICK_INTERVAL_US = 100_000n;        // 100ms — 10 fps when board is active
-const GOL_TICK_INTERVAL_IDLE_US = 2_000_000n; // 2s — board is stable, slow down
+const GOL_GRID_BYTES = GOL_CELL_COUNT / 2;  // 1250 bytes for the full board
+const GOL_TICK_INTERVAL_US = 100_000n;      // 100ms — 10 fps always
+const GOL_DIFF_HISTORY_LIMIT = 4096n;
 
 // --- Game of Life pre-allocated buffers (reused every tick; no per-tick allocation) ---
 const _golCurrentBuf = new Uint8Array(GOL_CELL_COUNT);
@@ -42,77 +43,6 @@ const _golDiffBuf    = new Uint8Array(GOL_CELL_COUNT * 3);
 
 // Whether _golCurrentBuf has been populated from DB (needed after republish).
 let _golBufferHydrated = false;
-
-// --- Loop detection ---
-// Rolling full-state history to detect oscillating patterns (period 1–64)
-// without false positives from color-changing boards or 32-bit hash collisions.
-const GOL_LOOP_HISTORY_SIZE = 64;
-const GOL_PERIOD2_CONFIRMATIONS = 10;
-const _golHashHistory = new Uint32Array(GOL_LOOP_HISTORY_SIZE);
-let _golHashCount = 0;
-const _golStateHistory = new Uint8Array(GOL_LOOP_HISTORY_SIZE * GOL_CELL_COUNT);
-let _golCandidateLoopPeriod = 0;
-let _golCandidateLoopStreak = 0;
-
-/** FNV-1a 32-bit hash of the full visible cell state, including colors. */
-function golStateHash(cells: Uint8Array): number {
-  let h = 0x811c9dc5;
-  for (let i = 0; i < GOL_CELL_COUNT; i++) {
-    h ^= cells[i];
-    h = Math.imul(h, 0x01000193);
-  }
-  return h >>> 0;
-}
-
-function golStateEquals(historySlot: number, cells: Uint8Array): boolean {
-  const base = historySlot * GOL_CELL_COUNT;
-  for (let i = 0; i < GOL_CELL_COUNT; i++) {
-    if (_golStateHistory[base + i] !== cells[i]) return false;
-  }
-  return true;
-}
-
-/** Check if hash matches any in history. Returns period (distance back) or 0. */
-function golCheckLoop(hash: number, cells: Uint8Array): number {
-  const count = Math.min(_golHashCount, GOL_LOOP_HISTORY_SIZE);
-  for (let i = 1; i <= count; i++) {
-    const idx = ((_golHashCount - i) % GOL_LOOP_HISTORY_SIZE + GOL_LOOP_HISTORY_SIZE) % GOL_LOOP_HISTORY_SIZE;
-    if (_golHashHistory[idx] === hash && golStateEquals(idx, cells)) return i;
-  }
-  return 0;
-}
-
-function golRecordHash(hash: number, cells: Uint8Array): void {
-  const slot = _golHashCount % GOL_LOOP_HISTORY_SIZE;
-  _golHashHistory[slot] = hash;
-  _golStateHistory.set(cells, slot * GOL_CELL_COUNT);
-  _golHashCount++;
-}
-
-function golClearLoopHistory(): void {
-  _golHashCount = 0;
-  _golHashHistory.fill(0);
-  _golCandidateLoopPeriod = 0;
-  _golCandidateLoopStreak = 0;
-}
-
-function golConfirmLoopPeriod(loopPeriod: number): number {
-  if (loopPeriod < 2) {
-    _golCandidateLoopPeriod = 0;
-    _golCandidateLoopStreak = 0;
-    return 0;
-  }
-
-  if (_golCandidateLoopPeriod === loopPeriod) {
-    _golCandidateLoopStreak++;
-  } else {
-    _golCandidateLoopPeriod = loopPeriod;
-    _golCandidateLoopStreak = 1;
-  }
-
-  if (loopPeriod === 2 && _golCandidateLoopStreak < GOL_PERIOD2_CONFIRMATIONS) return 0;
-  return loopPeriod;
-}
 
 // --- Nibble manipulation helpers ---
 
@@ -219,6 +149,16 @@ const GolSync = table(
   }
 );
 
+const GolBootstrap = table(
+  { name: 'gol_bootstrap', public: true },
+  {
+    id:         t.u32().primaryKey(),
+    cells:      t.byteArray(),
+    version:    t.u64(),
+    generation: t.u64(),
+  }
+);
+
 // Single-row loop detection status (separate table to avoid migration).
 const GolLoopStatus = table(
   { name: 'gol_loop_status', public: true },
@@ -244,6 +184,14 @@ const GolDiffV2 = table(
   {
     id:      t.u32().primaryKey(),
     version: t.u64(),
+    data:    t.byteArray(),
+  }
+);
+
+const GolDiffLog = table(
+  { name: 'gol_diff_log', public: true },
+  {
+    version: t.u64().primaryKey(),
     data:    t.byteArray(),
   }
 );
@@ -277,6 +225,13 @@ const spacetimedb = schema({
     {
       id: t.u32().primaryKey(),
       totalColored: t.u64(),
+    }
+  ),
+  checkboxSync: table(
+    { name: 'checkbox_sync', public: true },
+    {
+      id: t.u32().primaryKey(),
+      latestChangeId: t.u64(),
     }
   ),
   rateLimit: table(
@@ -315,9 +270,11 @@ const spacetimedb = schema({
   ),
   golRowChunk: GolRowChunk,
   golMeta: GolMeta,
+  golBootstrap: GolBootstrap,
   golSync: GolSync,
   golDiff: GolDiff,
   golDiffV2: GolDiffV2,
+  golDiffLog: GolDiffLog,
   golLoopStatus: GolLoopStatus,
   golTickJob: GolTickJob,
 });
@@ -442,13 +399,20 @@ export const toggle = spacetimedb.reducer(
 
     // Emit a lightweight change event (~24 bytes vs 2KB full row)
     if (changed) {
-      ctx.db.checkboxChanges.insert({
+      const change = ctx.db.checkboxChanges.insert({
         id: 0n,
         documentIdx,
         arrayIdx,
         color: clampedColor,
         createdAt: ctx.timestamp.microsSinceUnixEpoch,
       });
+
+      const sync = ctx.db.checkboxSync.id.find(0);
+      if (sync) {
+        ctx.db.checkboxSync.id.update({ id: 0, latestChangeId: change.id });
+      } else {
+        ctx.db.checkboxSync.insert({ id: 0, latestChangeId: change.id });
+      }
     }
   }
 );
@@ -608,21 +572,42 @@ function golNextGeneration(cells: Uint8Array, seed: number): Uint8Array {
 }
 
 /**
- * Ensure GOL grid is initialised.  Uses golMeta existence as a sentinel —
- * if meta row 0 exists, all 50 row-chunks are assumed to exist too.
+ * Ensure all persisted GOL state exists, hydrating from older snapshot sources
+ * when newer tables are missing after a publish.
  */
 function ensureGolGrid(ctx: any): void {
-  const meta = ctx.db.golMeta.id.find(0);
-  if (!meta) {
-    ctx.db.golMeta.insert({ id: 0, generation: 0n });
+  const bootstrap = ctx.db.golBootstrap.id.find(0);
+  const grid = ctx.db.golGrid.id.find(0);
+  const existingMeta = ctx.db.golMeta.id.find(0);
+  const existingSync = ctx.db.golSync.id.find(0);
+
+  let recoveredGeneration = existingMeta?.generation ?? bootstrap?.generation ?? grid?.generation ?? 0n;
+  let recoveredVersion = existingSync?.version ?? bootstrap?.version ?? 0n;
+
+  if (!existingSync) {
+    for (const row of ctx.db.golDiffLog.iter()) {
+      if (row.version > recoveredVersion) recoveredVersion = row.version;
+    }
   }
 
-  if (!ctx.db.golSync.id.find(0)) {
-    ctx.db.golSync.insert({ id: 0, version: 0n, generation: meta?.generation ?? 0n });
+  if (!existingMeta) {
+    ctx.db.golMeta.insert({ id: 0, generation: recoveredGeneration });
   }
-  if (!ctx.db.golLoopStatus.id.find(0)) {
-    ctx.db.golLoopStatus.insert({ id: 0, loopPeriod: 0 });
+
+  if (!existingSync) {
+    ctx.db.golSync.insert({ id: 0, version: recoveredVersion, generation: recoveredGeneration });
   }
+
+  const sync = ctx.db.golSync.id.find(0)!;
+
+  const hasGrid = !!ctx.db.golGrid.id.find(0);
+  const hasBootstrap = !!ctx.db.golBootstrap.id.find(0);
+  if (!hasGrid || !hasBootstrap) {
+    golHydrateBufferFromDb(ctx);
+    if (!hasGrid) golSyncGrid(ctx, sync.generation);
+    if (!hasBootstrap) golSyncBootstrap(ctx, sync.version, sync.generation);
+  }
+
   if (!ctx.db.golDiff.id.find(0)) {
     ctx.db.golDiff.insert({ id: 0, data: new Uint8Array(0) });
   }
@@ -634,6 +619,17 @@ function ensureGolGrid(ctx: any): void {
       ctx.db.golRowChunk.insert({ rowIdx, cells: new Uint8Array(GOL_CHUNK_BYTES) });
     }
   }
+}
+
+function ensureCheckboxSync(ctx: any) {
+  if (ctx.db.checkboxSync.id.find(0)) return;
+
+  let latestChangeId = 0n;
+  for (const row of ctx.db.checkboxChanges.iter()) {
+    if (row.id > latestChangeId) latestChangeId = row.id;
+  }
+
+  ctx.db.checkboxSync.insert({ id: 0, latestChangeId });
 }
 
 function golUpsertSync(ctx: any, version: bigint, generation: bigint): void {
@@ -659,6 +655,11 @@ function golWriteDiffRows(ctx: any, version: bigint, data: Uint8Array): void {
   } else {
     ctx.db.golDiffV2.insert({ id: 0, version, data });
   }
+
+  ctx.db.golDiffLog.insert({ version, data });
+  if (version > GOL_DIFF_HISTORY_LIMIT) {
+    ctx.db.golDiffLog.version.delete(version - GOL_DIFF_HISTORY_LIMIT);
+  }
 }
 
 function golSyncRows(ctx: any, rowMask: Uint8Array): void {
@@ -676,10 +677,56 @@ function golSyncRows(ctx: any, rowMask: Uint8Array): void {
   }
 }
 
+function golSyncGrid(ctx: any, generation: bigint): void {
+  const cells = new Uint8Array(GOL_GRID_BYTES);
+  for (let idx = 0; idx < GOL_CELL_COUNT; idx++) {
+    setColor(cells, idx, _golCurrentBuf[idx]);
+  }
+
+  const existing = ctx.db.golGrid.id.find(0);
+  if (existing) {
+    ctx.db.golGrid.id.update({ id: 0, cells, generation });
+  } else {
+    ctx.db.golGrid.insert({ id: 0, cells, generation });
+  }
+}
+
+function golSyncBootstrap(ctx: any, version: bigint, generation: bigint): void {
+  const cells = new Uint8Array(GOL_GRID_BYTES);
+  for (let idx = 0; idx < GOL_CELL_COUNT; idx++) {
+    setColor(cells, idx, _golCurrentBuf[idx]);
+  }
+
+  const existing = ctx.db.golBootstrap.id.find(0);
+  if (existing) {
+    ctx.db.golBootstrap.id.update({ id: 0, cells, version, generation });
+  } else {
+    ctx.db.golBootstrap.insert({ id: 0, cells, version, generation });
+  }
+}
+
 function golHydrateBufferFromDb(ctx: any): void {
   if (_golBufferHydrated) return;
 
   _golCurrentBuf.fill(0);
+  const grid = ctx.db.golGrid.id.find(0);
+  if (grid && grid.cells.length === GOL_GRID_BYTES) {
+    for (let idx = 0; idx < GOL_CELL_COUNT; idx++) {
+      _golCurrentBuf[idx] = getColor(grid.cells, idx);
+    }
+    _golBufferHydrated = true;
+    return;
+  }
+
+  const bootstrap = ctx.db.golBootstrap.id.find(0);
+  if (bootstrap && bootstrap.cells.length === GOL_GRID_BYTES) {
+    for (let idx = 0; idx < GOL_CELL_COUNT; idx++) {
+      _golCurrentBuf[idx] = getColor(bootstrap.cells, idx);
+    }
+    _golBufferHydrated = true;
+    return;
+  }
+
   for (const chunk of ctx.db.golRowChunk.iter()) {
     const base = chunk.rowIdx * GOL_COLS;
     for (let x = 0; x < GOL_COLS; x++) {
@@ -720,33 +767,59 @@ export const gol_tap_cell = spacetimedb.reducer(
     checkRateLimit(ctx);
     if (x >= GOL_COLS || y >= GOL_ROWS) throw new SenderError('Out of bounds');
     ensureGolGrid(ctx);
-    golClearLoopHistory(); // new input breaks any detected loop
 
-    // Immediately clear the loop status so clients hide the "loop" indicator
-    const loopRow = ctx.db.golLoopStatus.id.find(0);
-    if (loopRow && loopRow.loopPeriod !== 0) {
-      ctx.db.golLoopStatus.id.update({ id: 0, loopPeriod: 0 });
+    // Keep the normal tick chain running; only backfill a job if it is missing.
+    let hasTickJob = false;
+    for (const _ of ctx.db.golTickJob.iter()) {
+      hasTickJob = true;
+      break;
     }
-
-    // Cancel the slow idle tick and reschedule at full speed
-    for (const job of ctx.db.golTickJob.iter()) {
-      ctx.db.golTickJob.scheduledId.delete(job.scheduledId);
+    if (!hasTickJob) {
+      ctx.db.golTickJob.insert({
+        scheduledId: 0n,
+        scheduledAt: ScheduleAt.time(ctx.timestamp.microsSinceUnixEpoch + GOL_TICK_INTERVAL_US),
+      });
     }
-    ctx.db.golTickJob.insert({
-      scheduledId: 0n,
-      scheduledAt: ScheduleAt.time(ctx.timestamp.microsSinceUnixEpoch + GOL_TICK_INTERVAL_US),
-    });
 
     const color = colorFromIdentity(ctx.sender);
 
     golHydrateBufferFromDb(ctx);
 
-    // Center + four arms (boundary-safe: skip out-of-bounds).
+    // Center + four arms, plus a couple of small random sprouts so taps
+    // feel less mechanically identical.
     const points: [number, number][] = [
       [x, y], [x, y - 1], [x, y + 1], [x - 1, y], [x + 1, y],
     ];
+    const rngSeed = Number(
+      (ctx.timestamp.microsSinceUnixEpoch
+        ^ (BigInt(x) << 16n)
+        ^ (BigInt(y) << 1n)) & 0xFFFFFFFFn
+    );
+    const rng = createRng(rngSeed);
+    const candidates: [number, number][] = [
+      [x - 1, y - 1],
+      [x, y - 2],
+      [x + 1, y - 1],
+      [x - 2, y],
+      [x + 2, y],
+      [x - 1, y + 1],
+      [x, y + 2],
+      [x + 1, y + 1],
+    ];
+    for (let i = candidates.length - 1; i > 0; i--) {
+      const j = rng.next() % (i + 1);
+      const tmp = candidates[i];
+      candidates[i] = candidates[j];
+      candidates[j] = tmp;
+    }
+    points.push(candidates[0], candidates[1]);
+
+    const seen = new Set<string>();
     let diffLen = 0;
     for (const [px, py] of points) {
+      const key = `${px},${py}`;
+      if (seen.has(key)) continue;
+      seen.add(key);
       if (px >= 0 && px < GOL_COLS && py >= 0 && py < GOL_ROWS) {
         const idx = py * GOL_COLS + px;
         if (_golCurrentBuf[idx] === color) continue;
@@ -767,6 +840,8 @@ export const gol_tap_cell = spacetimedb.reducer(
     const nextVersion = sync.version + 1n;
     golWriteDiffRows(ctx, nextVersion, diffSlice);
     golSyncRows(ctx, rowMask);
+    golSyncGrid(ctx, sync.generation);
+    golSyncBootstrap(ctx, nextVersion, sync.generation);
     golUpsertSync(ctx, nextVersion, sync.generation);
   }
 );
@@ -775,10 +850,9 @@ export const gol_tap_cell = spacetimedb.reducer(
  * Scheduled reducer: advance one GOL generation and always reschedule.
  *
  * Bandwidth strategy:
- *   - Live clients use gol_diff only (packed [x, y, color] triples).
- *   - Bootstrapping clients temporarily subscribe to gol_row_chunk until gol_diff is live.
- *   - Only touched rows are synced, so bootstrap state stays current cheaply.
- *   - Adaptive tick rate: 100ms active, 2s idle (period > 2 or static).
+ *   - Bootstrap clients load one atomic board snapshot from `gol_bootstrap`.
+ *   - Live clients replay append-only `gol_diff_log` rows in version order.
+ *   - The board runs continuously at 10 fps.
  */
 export const run_gol_tick = spacetimedb.reducer(
   { arg: GolTickJob.rowType },
@@ -802,13 +876,7 @@ export const run_gol_tick = spacetimedb.reducer(
       }
     }
 
-    // 4. Loop detection: compare the full visible board, including colors.
-    const stateHash = golStateHash(_golNextBuf);
-    const loopPeriod = golCheckLoop(stateHash, _golNextBuf);
-    const confirmedLoopPeriod = golConfirmLoopPeriod(loopPeriod);
-    golRecordHash(stateHash, _golNextBuf);
-
-    // 5. Advance in-memory state: current ← next for the next tick.
+    // 4. Advance in-memory state: current <- next for the next tick.
     _golCurrentBuf.set(_golNextBuf);
 
     const meta = ctx.db.golMeta.id.find(0)!;
@@ -816,40 +884,27 @@ export const run_gol_tick = spacetimedb.reducer(
     const gen = meta.generation + 1n;
     let nextVersion = sync.version;
 
-    // 6. Write diff row when the board actually changes.
+    // 5. Write diff row when the board actually changes.
     if (diffLen > 0) {
       const rowMask = new Uint8Array(GOL_ROWS);
       for (let i = 1; i < diffLen; i += 3) rowMask[_golDiffBuf[i]] = 1;
 
-      const diffSlice = _golDiffBuf.slice(0, diffLen);
-      nextVersion = sync.version + 1n;
-      golWriteDiffRows(ctx, nextVersion, diffSlice);
-      golSyncRows(ctx, rowMask);
-    }
+        const diffSlice = _golDiffBuf.slice(0, diffLen);
+        nextVersion = sync.version + 1n;
+        golWriteDiffRows(ctx, nextVersion, diffSlice);
+        golSyncRows(ctx, rowMask);
+      }
 
-    // 7. Update generation counter.
+    // 6. Update generation counter and the authoritative full-board snapshot.
     ctx.db.golMeta.id.update({ ...meta, generation: gen });
+    golSyncGrid(ctx, gen);
+    golSyncBootstrap(ctx, nextVersion, gen);
     golUpsertSync(ctx, nextVersion, gen);
 
-    // 7b. Update loop detection status. Keep period 1 hidden, but surface
-    //     period 2+ oscillators so blinkers and similar patterns are reported.
-    const reportedPeriod = confirmedLoopPeriod;
-    const loopRow = ctx.db.golLoopStatus.id.find(0);
-    if (loopRow) {
-      if (loopRow.loopPeriod !== reportedPeriod) {
-        ctx.db.golLoopStatus.id.update({ id: 0, loopPeriod: reportedPeriod });
-      }
-    } else {
-      ctx.db.golLoopStatus.insert({ id: 0, loopPeriod: reportedPeriod });
-    }
-
-    // 8. Adaptive reschedule: slow down for static boards and confirmed loops,
-    //    including period-2 oscillators once they repeat consistently.
-    const isIdle = diffLen === 0 || confirmedLoopPeriod >= 2;
-    const interval = isIdle ? GOL_TICK_INTERVAL_IDLE_US : GOL_TICK_INTERVAL_US;
+    // 7. Reschedule the next tick at a constant 10 fps.
     ctx.db.golTickJob.insert({
       scheduledId: 0n,
-      scheduledAt: ScheduleAt.time(ctx.timestamp.microsSinceUnixEpoch + interval),
+      scheduledAt: ScheduleAt.time(ctx.timestamp.microsSinceUnixEpoch + GOL_TICK_INTERVAL_US),
     });
   }
 );
@@ -859,6 +914,7 @@ export const run_gol_tick = spacetimedb.reducer(
 export const init = spacetimedb.init((ctx) => {
   // Sync stats from existing data
   recalcStats(ctx);
+  ensureCheckboxSync(ctx);
 
   // Schedule stats sync job (15s interval)
   const syncTime = ctx.timestamp.microsSinceUnixEpoch + 15_000_000n;
@@ -882,6 +938,8 @@ export const init = spacetimedb.init((ctx) => {
 });
 
 export const onConnect = spacetimedb.clientConnected((ctx) => {
+  ensureCheckboxSync(ctx);
+
   // Ensure GOL grid is initialised and the tick loop is running.
   // init only fires on first database creation; after a republish the tick
   // chain may be dead.  Only schedule if no pending tick jobs exist (prevents

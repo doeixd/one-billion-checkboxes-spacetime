@@ -154,6 +154,31 @@ Practical guidance for this repo:
 4. Check server logs for errors (`spacetime logs <db-name>`)
 5. **Is the reducer actually being called from the client?**
 
+### Subscription hook timing notes (from SpacetimeDB docs)
+
+- `onApplied` runs after the SDK has atomically applied the full subscription snapshot into the local cache
+- Callback ordering is **not** guaranteed between row callbacks (`onInsert`/`onUpdate`/`onDelete`) and `onApplied`
+- Do **not** depend on `onInsert` having fired before `onApplied`; if you need initial state, read it from `conn.db...` inside `onApplied`
+- Subscription initialization is an atomic snapshot taken between transactions, so rows read from the cache in `onApplied` come from one consistent committed state
+- Transaction updates are also applied atomically before callbacks run, so callbacks see a fully updated cache, not an intermediate state
+- `unsubscribe()` is asynchronous; if changing subscription sets, subscribe to the new set before unsubscribing the old one
+- For handoff flows (bootstrap -> live diffs), read the current subscribed rows from cache in each `onApplied`, and explicitly bridge any latest diff row that may have landed between the two subscriptions
+
+### Repo-specific streaming lessons
+
+- Never render a bootstrap snapshot just because phase 1 `onApplied` fired; for this repo, the safe first render is the snapshot reread from cache inside phase 2 `onApplied`, immediately before replaying post-snapshot diffs
+- If a cell can become static after bootstrap, missing the one diff that created it means it can stay wrong forever; this bit the Game of Life client, so bootstrap/version handoff must be exact
+- A single mutable "latest diff" row is not enough for correct bootstrap -> live handoff under load; use an append-only diff log with monotonic versions (`gol_diff_log`) so the client can replay every diff after the snapshot version
+- Treat version gaps as fatal for local state: if the next diff version is not exactly `lastAppliedVersion + 1`, resubscribe and rebuild from snapshot
+- Keep old subscriptions alive until the new subscription set has fully applied; do not eagerly unsubscribe the old set before the replacement set is live
+- Validate snapshot rows before accepting them as ready state; for GOL, `gol_bootstrap.cells` must be the full packed board length (1250 bytes)
+- If you add new snapshot tables to an existing DB, hydrate them from the old authoritative state first; do not seed new rows with zeros or you can wipe visible state after publish
+- For this repo's GOL stream, the current safe pattern is: bootstrap from `gol_bootstrap`, replay `gol_diff_log` rows with `version > snapshot.version`, periodically resync, and only then switch to steady live diffs
+- `gol_sync` is useful for server bookkeeping/bootstrap metadata, but sending it on every live tick bloats websocket payloads; prefer lean live diffs and let the UI generation counter self-correct on snapshot/resync if exact live metadata is not worth the bytes
+- Checkbox streaming has the same handoff problem in a different form: retained `checkbox_changes` rows are not automatically "live" events, so phase 2 must start strictly after a bootstrap watermark (`checkbox_sync.latest_change_id`)
+- For checkbox handoff, subscribe to `checkbox_sync` during bootstrap, read the watermark from cache in `onApplied`, then subscribe to `checkbox_changes` with `id > latest_change_id`; otherwise old retained changes can be replayed onto already-current rows
+- When debugging desync in this repo, distinguish three failure classes: (1) server snapshot row is wrong, (2) bootstrap/live handoff missed or duplicated updates, (3) UI applied a correct event stream incorrectly
+
 ---
 
 ## Editing Behavior

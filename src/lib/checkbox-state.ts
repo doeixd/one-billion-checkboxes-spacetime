@@ -4,6 +4,11 @@ import type { CheckboxChanges, Checkboxes, Stats } from "../module_bindings/type
 type BoxesByDocument = Record<number, Uint8Array>;
 type PendingByDocument = Record<number, Record<number, number>>;
 
+function getColorLocal(boxes: ArrayLike<number>, arrayIdx: number): number {
+  const byte = boxes[Math.floor(arrayIdx / 2)] || 0;
+  return arrayIdx % 2 === 0 ? byte & 0x0f : (byte >> 4) & 0x0f;
+}
+
 function setColorLocal(boxes: Uint8Array, arrayIdx: number, color: number): void {
   const byteIdx = Math.floor(arrayIdx / 2);
   const byte = boxes[byteIdx] || 0;
@@ -39,15 +44,36 @@ export function createCheckboxStateController(options: {
       s[row.idx] = row.boxes;
     });
 
-    if (options.pendingStore[row.idx]) {
+    const pendingDoc = options.pendingStore[row.idx];
+    const resolvedPending = new Set<number>();
+    if (pendingDoc) {
+      for (const [arrayIdxStr, pendingColor] of Object.entries(pendingDoc)) {
+        const arrayIdx = Number(arrayIdxStr);
+        if (getColorLocal(row.boxes, arrayIdx) === pendingColor) {
+          resolvedPending.add(arrayIdx);
+        }
+      }
+
       options.setPendingStore(s => {
-        delete s[row.idx];
+        const current = s[row.idx];
+        if (!current) return;
+
+        for (const arrayIdx of resolvedPending) {
+          delete current[arrayIdx];
+        }
+
+        if (Object.keys(current).length === 0) {
+          delete s[row.idx];
+        }
       });
     }
 
     const prefix = `${row.idx}:`;
     for (const [key, inflight] of options.inflightCells) {
       if (!key.startsWith(prefix)) continue;
+      const arrayIdx = Number(key.slice(prefix.length));
+      if (Number.isNaN(arrayIdx)) continue;
+      if (pendingDoc?.[arrayIdx] !== undefined && !resolvedPending.has(arrayIdx)) continue;
       options.inflightCells.delete(key);
       setRoundTrip(Math.round(performance.now() - inflight.time));
       options.setPendingToggleCount(c => Math.max(0, c - inflight.count));
@@ -72,7 +98,7 @@ export function createCheckboxStateController(options: {
       });
     }
 
-    if (options.pendingStore[documentIdx]?.[arrayIdx] !== undefined) {
+    if (options.pendingStore[documentIdx]?.[arrayIdx] === color) {
       options.setPendingStore(s => {
         if (!s[documentIdx]) return;
         delete s[documentIdx][arrayIdx];

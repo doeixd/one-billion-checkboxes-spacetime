@@ -19,6 +19,12 @@ export const CheckboxChanges = __t.object("CheckboxChanges", {
 });
 export type CheckboxChanges = __Infer<typeof CheckboxChanges>;
 
+export const CheckboxSync = __t.object("CheckboxSync", {
+  id: __t.u32(),
+  latestChangeId: __t.u64(),
+});
+export type CheckboxSync = __Infer<typeof CheckboxSync>;
+
 export const Checkboxes = __t.object("Checkboxes", {
   idx: __t.u32(),
   boxes: __t.byteArray(),
@@ -32,11 +38,25 @@ export const FingerprintRateLimit = __t.object("FingerprintRateLimit", {
 });
 export type FingerprintRateLimit = __Infer<typeof FingerprintRateLimit>;
 
+export const GolBootstrap = __t.object("GolBootstrap", {
+  id: __t.u32(),
+  cells: __t.byteArray(),
+  version: __t.u64(),
+  generation: __t.u64(),
+});
+export type GolBootstrap = __Infer<typeof GolBootstrap>;
+
 export const GolDiff = __t.object("GolDiff", {
   id: __t.u32(),
   data: __t.byteArray(),
 });
 export type GolDiff = __Infer<typeof GolDiff>;
+
+export const GolDiffLog = __t.object("GolDiffLog", {
+  version: __t.u64(),
+  data: __t.byteArray(),
+});
+export type GolDiffLog = __Infer<typeof GolDiffLog>;
 
 export const GolDiffV2 = __t.object("GolDiffV2", {
   id: __t.u32(),

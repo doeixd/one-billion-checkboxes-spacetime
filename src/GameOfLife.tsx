@@ -7,9 +7,9 @@
  * All clients see the same board state — no local simulation.
  *
  * Data model:
- *   gol_row_chunk  — current row snapshots used during bootstrap.
+ *   gol_grid       — authoritative full-board snapshot used during bootstrap.
  *   gol_sync       — board version + generation for sync handoff.
- *   gol_diff_v2    — versioned packed [x, y, color] live diffs.
+ *   gol_diff_log   — append-only versioned packed [x, y, color] live diffs.
  *
  * Rendering: each cell is a div with a CSS class (gol-c0..gol-c15) for
  * its color. Solid's fine-grained reactivity only touches cells whose
@@ -32,7 +32,6 @@ import "./gol.css";
 const GOL_COLS = 50;
 const GOL_ROWS = 50;
 const CELL_COUNT = GOL_COLS * GOL_ROWS;
-
 const indices = Array.from({ length: CELL_COUNT }, (_, i) => i);
 
 // Pre-built class name strings — no allocation on lookup.
@@ -50,7 +49,6 @@ function calcCellSize() {
 export default function GameOfLife() {
   const [cells, setCells] = createStore<number[]>(new Array(CELL_COUNT).fill(0));
   const [generation, setGeneration] = createSignal(0n);
-  const [loopPeriod, setLoopPeriod] = createSignal(0);
   const [cellPx, setCellPx] = createSignal(calcCellSize());
   const [syncPhase, setSyncPhase] = createSignal<GolStreamPhase>("syncing");
 
@@ -65,16 +63,12 @@ export default function GameOfLife() {
     return true as const;
   });
 
-  const applySnapshot = (rows: Map<number, Uint8Array>) => {
+  const applySnapshot = (data: Uint8Array) => {
     setCells((s: number[]) => {
       s.fill(0);
-      for (const [rowIdx, bytes] of rows) {
-        const base = rowIdx * GOL_COLS;
-        for (let x = 0; x < GOL_COLS; x++) {
-          const byteIdx = x >> 1;
-          const byte = bytes[byteIdx] || 0;
-          s[base + x] = x % 2 === 0 ? (byte & 0x0F) : ((byte >> 4) & 0x0F);
-        }
+      for (let idx = 0; idx < CELL_COUNT; idx++) {
+        const byte = data[idx >> 1] || 0;
+        s[idx] = idx % 2 === 0 ? (byte & 0x0F) : ((byte >> 4) & 0x0F);
       }
     });
   };
@@ -107,7 +101,7 @@ export default function GameOfLife() {
               setSyncPhase(event.phase);
               break;
             case "snapshot-ready":
-              applySnapshot(event.rows);
+              applySnapshot(event.cells);
               setGeneration(event.generation);
               if (!boardReadyResolved) {
                 boardReadyResolved = true;
@@ -119,9 +113,6 @@ export default function GameOfLife() {
               break;
             case "sync":
               setGeneration(event.generation);
-              break;
-            case "loop-status":
-              setLoopPeriod(event.loopPeriod);
               break;
           }
         }
@@ -220,15 +211,6 @@ export default function GameOfLife() {
           <span style={{ "font-size": "0.8rem", color: "#6b7280" }}>
             Gen {generation().toString()}
           </span>
-          <Show when={loopPeriod() > 0}>
-            <span style={{
-              "font-size": "0.75rem",
-              color: "#d97706",
-              "font-weight": "600",
-            }}>
-              {`Loop (period ${loopPeriod()}) — tap the board to resume`}
-            </span>
-          </Show>
         </div>
 
         <div style={{ "font-size": "0.75rem", color: "#6b7280" }}>

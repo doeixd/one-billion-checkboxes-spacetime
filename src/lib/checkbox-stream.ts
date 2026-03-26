@@ -18,16 +18,20 @@ const fullQueries = (range: CheckboxDocRange) =>
     ? [
         `SELECT * FROM checkboxes WHERE idx >= ${range.min}`,
         `SELECT * FROM checkboxes WHERE idx <= ${range.max}`,
+        "SELECT * FROM checkbox_sync",
       ]
-    : [`SELECT * FROM checkboxes WHERE idx >= ${range.min} AND idx <= ${range.max}`];
+    : [
+        `SELECT * FROM checkboxes WHERE idx >= ${range.min} AND idx <= ${range.max}`,
+        "SELECT * FROM checkbox_sync",
+      ];
 
-const changeQueries = (range: CheckboxDocRange) =>
+const changeQueries = (range: CheckboxDocRange, latestChangeId: bigint) =>
   range.wraps
     ? [
-        `SELECT * FROM checkbox_changes WHERE document_idx >= ${range.min}`,
-        `SELECT * FROM checkbox_changes WHERE document_idx <= ${range.max}`,
+        `SELECT * FROM checkbox_changes WHERE document_idx >= ${range.min} AND id > ${latestChangeId}`,
+        `SELECT * FROM checkbox_changes WHERE document_idx <= ${range.max} AND id > ${latestChangeId}`,
       ]
-    : [`SELECT * FROM checkbox_changes WHERE document_idx >= ${range.min} AND document_idx <= ${range.max}`];
+    : [`SELECT * FROM checkbox_changes WHERE document_idx >= ${range.min} AND document_idx <= ${range.max} AND id > ${latestChangeId}`];
 
 export function checkboxRangeStream(options: {
   conn: DbConnection;
@@ -68,6 +72,9 @@ export function checkboxRangeStream(options: {
         .onApplied(() => {
           if (disposed) return;
 
+          const sync = conn.db.checkboxSync.id.find(0);
+          const latestChangeId = sync?.latestChangeId ?? 0n;
+
           queue.push({ kind: "snapshot-ready", range });
 
           phase2Handle = conn
@@ -81,7 +88,7 @@ export function checkboxRangeStream(options: {
                 phase1Handle = null;
               }
             })
-            .subscribe(changeQueries(range));
+            .subscribe(changeQueries(range, latestChangeId));
         })
         .subscribe(fullQueries(range));
 
