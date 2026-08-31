@@ -12,9 +12,11 @@ export type GolBoardEvent =
 
 const SNAPSHOT_QUERIES = [
   "SELECT * FROM gol_bootstrap",
+  "SELECT * FROM gol_sync",
 ];
 
-const LIVE_QUERIES = [
+const diffQueries = (version: bigint) => [
+  `SELECT * FROM gol_diff_log WHERE version > ${version}`,
   "SELECT * FROM gol_sync",
 ];
 
@@ -48,13 +50,13 @@ export function golBoardStream(options: {
       const queue = createAsyncQueue<GolBoardEvent>(signal);
 
       let snapshotHandle: SubscriptionHandle | null = null;
-      let liveHandle: SubscriptionHandle | null = null;
+      let diffHandle: SubscriptionHandle | null = null;
       let subscriptionLive = false;
       let disposed = false;
-      let subGeneration = 0;
       let lastAppliedVersion = 0n;
       let pendingSync: GolSync | null = null;
       let periodicResyncTimer = 0;
+      let syncAttempt = 0;
 
       const safeUnsub = (handle: SubscriptionHandle | null) => {
         if (!handle) return;
@@ -81,62 +83,76 @@ export function golBoardStream(options: {
         pendingSync = null;
       };
 
+      const replayPendingDiffs = (baseVersion: bigint, attempt: number) => {
+        const pendingDiffs = readPendingDiffs();
+        let replayVersion = baseVersion;
+
+        for (const diff of pendingDiffs) {
+          if (diff.version <= replayVersion) continue;
+          if (diff.version !== replayVersion + 1n) {
+            startSubscriptions("resyncing");
+            return false;
+          }
+
+          if (disposed || attempt !== syncAttempt) return false;
+
+          replayVersion = diff.version;
+          lastAppliedVersion = diff.version;
+          queue.push({
+            kind: "diff",
+            version: diff.version,
+            data: diff.data,
+          });
+        }
+
+        return true;
+      };
+
       const startSubscriptions = (phase: Exclude<GolStreamPhase, "live">) => {
         if (disposed) return;
 
+        syncAttempt += 1;
+        const attempt = syncAttempt;
         const previousSnapshotHandle = snapshotHandle;
-        const previousLiveHandle = liveHandle;
+        const previousDiffHandle = diffHandle;
         snapshotHandle = null;
-        liveHandle = null;
+        diffHandle = null;
         resetSyncState(phase);
-
-        const gen = ++subGeneration;
 
         snapshotHandle = conn
           .subscriptionBuilder()
-          .onError(ctx => queue.error(ctx.event ?? new Error("GOL bootstrap subscription failed")))
+          .onError(ctx => queue.error(ctx.event ?? new Error("GOL snapshot subscription failed")))
           .onApplied(() => {
-            if (disposed || gen !== subGeneration) return;
-            const bootstrapSnapshot = readSnapshot();
-            if (!bootstrapSnapshot) {
+            if (disposed || attempt !== syncAttempt) return;
+
+            const snapshot = readSnapshot();
+            if (!snapshot) {
               startSubscriptions("resyncing");
               return;
             }
 
-            liveHandle = conn
+            diffHandle = conn
               .subscriptionBuilder()
-              .onError(ctx => queue.error(ctx.event ?? new Error("GOL live subscription failed")))
+              .onError(ctx => queue.error(ctx.event ?? new Error("GOL diff subscription failed")))
               .onApplied(() => {
-                if (disposed || gen !== subGeneration) return;
+                if (disposed || attempt !== syncAttempt) return;
 
-                const snapshot = readSnapshot();
-                if (!snapshot) {
+                const latestSnapshot = readSnapshot();
+                if (!latestSnapshot) {
                   startSubscriptions("resyncing");
                   return;
                 }
 
-                lastAppliedVersion = snapshot.version;
+                lastAppliedVersion = latestSnapshot.version;
                 queue.push({
                   kind: "snapshot-ready",
-                  cells: snapshot.cells,
-                  generation: snapshot.generation,
-                  version: snapshot.version,
+                  cells: latestSnapshot.cells,
+                  generation: latestSnapshot.generation,
+                  version: latestSnapshot.version,
                 });
 
-                const pendingDiffs = readPendingDiffs();
-                for (const diff of pendingDiffs) {
-                  if (diff.version <= lastAppliedVersion) continue;
-                  if (diff.version !== lastAppliedVersion + 1n) {
-                    startSubscriptions("resyncing");
-                    return;
-                  }
-
-                  lastAppliedVersion = diff.version;
-                  queue.push({
-                    kind: "diff",
-                    version: diff.version,
-                    data: diff.data,
-                  });
+                if (!replayPendingDiffs(latestSnapshot.version, attempt)) {
+                  return;
                 }
 
                 subscriptionLive = true;
@@ -149,14 +165,11 @@ export function golBoardStream(options: {
                 }
 
                 safeUnsub(previousSnapshotHandle);
-                safeUnsub(previousLiveHandle);
+                safeUnsub(previousDiffHandle);
                 safeUnsub(snapshotHandle);
                 if (snapshotHandle?.isEnded()) snapshotHandle = null;
               })
-              .subscribe([
-                `SELECT * FROM gol_diff_log WHERE version > ${bootstrapSnapshot.version}`,
-                ...LIVE_QUERIES,
-              ]);
+              .subscribe(diffQueries(snapshot.version));
           })
           .subscribe(SNAPSHOT_QUERIES);
       };
@@ -200,7 +213,7 @@ export function golBoardStream(options: {
         disposed = true;
         clearInterval(periodicResyncTimer);
         safeUnsub(snapshotHandle);
-        safeUnsub(liveHandle);
+        safeUnsub(diffHandle);
         conn.db.golDiffLog.removeOnInsert(handleDiffInsert);
         conn.db.golDiffLog.removeOnUpdate(handleDiffUpdate);
         conn.db.golSync.removeOnInsert(handleSyncInsert);

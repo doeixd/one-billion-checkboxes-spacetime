@@ -23,7 +23,6 @@ import {
   createEffect,
   isPending,
   onSettled,
-  onCleanup,
   For,
   Show,
   Loading,
@@ -33,7 +32,8 @@ import { conn, isConnected } from "./main.tsx";
 import type { EventContext } from "./module_bindings/index.ts";
 import type { Checkboxes, CheckboxChanges, Stats } from "./module_bindings/types.ts";
 import { checkboxRangeStream, type CheckboxDocRange, type CheckboxRangePhase } from "./lib/checkbox-stream.ts";
-import { createCheckboxStateController } from "./lib/checkbox-state.ts";
+import { createCheckboxStateController, type InflightCell } from "./lib/checkbox-state.ts";
+import { buildCellSprites, paintGrid, type CellSprites } from "./lib/grid-canvas.ts";
 
 // ─── Constants ────────────────────────────────────────────────────────────────
 
@@ -112,12 +112,17 @@ export default function App() {
   // ── Round-trip timing ─────────────────────────────────────────────────
   // Keyed by "docIdx:arrayIdx" so foreign change events (other users clicking
   // a different cell in the same document) don't steal our inflight counts.
-  const inflightCells = new Map<string, { time: number; count: number }>();
+  const inflightCells = new Map<string, InflightCell>();
   const [pendingToggleCount, setPendingToggleCount] = createSignal(0);
   const [lastRoundTripMs, setLastRoundTripMs] = createSignal<number | null>(
     null,
   );
   let inflightGcTimer = 0;
+
+  // Bumped whenever painted board data changes, so the canvas renderer knows to
+  // repaint without subscribing to every cell in the store.
+  const [dataVersion, setDataVersion] = createSignal(0);
+  const bumpDataVersion = () => setDataVersion(v => v + 1);
 
   const checkboxState = createCheckboxStateController({
     rawBoxes,
@@ -129,6 +134,7 @@ export default function App() {
     setLastRoundTripMs,
     setTotalColored,
     setPendingCountDelta,
+    onChange: bumpDataVersion,
   });
 
   const rangeContainsDoc = (range: CheckboxDocRange, docIdx: number) =>
@@ -156,16 +162,21 @@ export default function App() {
         delete s[docIdx];
       });
     }
+
+    bumpDataVersion();
   };
 
   /** Periodically clear stale inflight cells (safety net for missed events). */
   const INFLIGHT_STALE_MS = 8000;
   const gcInflightCells = () => {
     const now = performance.now();
-    for (const [key, inflight] of inflightCells) {
+    for (const [key, inflight] of [...inflightCells]) {
       if (now - inflight.time > INFLIGHT_STALE_MS) {
-        inflightCells.delete(key);
-        setPendingToggleCount((c) => Math.max(0, c - inflight.count));
+        const sep = key.indexOf(":");
+        checkboxState.dropInflight(
+          Number(key.slice(0, sep)),
+          Number(key.slice(sep + 1)),
+        );
       }
     }
     inflightGcTimer = inflightCells.size > 0
@@ -257,6 +268,9 @@ export default function App() {
         if (!containerMeasured()) setContainerMeasured(true);
         // Recalculate offset for new column count after resize
         if (scrollRef && !scrollFromInput) {
+          // Measured here rather than in the scroll handler: reading offsetWidth
+          // forces layout, and the scrollbar cannot change width mid-scroll.
+          setScrollbarWidth(scrollRef.offsetWidth - scrollRef.clientWidth);
           const cols = Math.max(1, Math.floor((e.contentRect.width - scrollbarWidth()) / CELL_SIZE));
           const topRow = Math.floor((scrollRef.scrollTop * scrollScale()) / CELL_SIZE);
           setCurrentOffset(Math.min(topRow * cols, NUM_BOXES - 1));
@@ -265,14 +279,14 @@ export default function App() {
     });
     obs.observe(containerRef);
 
-    onCleanup(() => {
+    const disposeObserver = () => {
       obs.disconnect();
       cancelAnimationFrame(rafId);
       clearTimeout(subDebounceTimer);
       clearTimeout(inflightGcTimer);
       clearTimeout(urlUpdateTimer);
       checkboxState.cleanup();
-    });
+    };
 
     const handleCheckboxInsert = (_ctx: EventContext, row: Checkboxes) => {
       checkboxState.upsertRow(row);
@@ -313,7 +327,11 @@ export default function App() {
       .onApplied(() => setStatsReady(true))
       .subscribe("SELECT * FROM stats");
 
-    onCleanup(() => {
+    // onSettled takes a returned cleanup function; calling onCleanup inside it
+    // is a hard error in Solid 2.x (CLEANUP_IN_FORBIDDEN_SCOPE), and the throw
+    // halts the whole reactive system.
+    return () => {
+      disposeObserver();
       conn.db.checkboxes.removeOnInsert(handleCheckboxInsert);
       conn.db.checkboxes.removeOnUpdate(handleCheckboxUpdate);
       conn.db.checkboxes.removeOnDelete(handleCheckboxDelete);
@@ -324,7 +342,7 @@ export default function App() {
       try {
         if (!statsHandle.isEnded()) statsHandle.unsubscribe();
       } catch {}
-    });
+    };
   });
 
   // ── Derived scroll values ─────────────────────────────────────────────
@@ -496,7 +514,6 @@ export default function App() {
     rafId = requestAnimationFrame(() => {
       if (!scrollRef) return;
       setScrollTop(scrollRef.scrollTop);
-      setScrollbarWidth(scrollRef.offsetWidth - scrollRef.clientWidth);
 
       // Scroll → offset + URL (skip if this scroll was triggered by input)
       if (!scrollFromInput) {
@@ -544,74 +561,142 @@ export default function App() {
         ? 0
         : selectedColor();
 
-    // Optimistic count adjustment
-    const wasColored = currentColor > 0;
-    const isColored = newColor > 0;
-    if (wasColored !== isColored) {
-      setPendingCountDelta((d) => d + (isColored ? 1 : -1));
-    }
+    // A toggle that does not change the cell produces no server-side change and
+    // therefore no change event to confirm it — it would sit in `inflightCells`
+    // until the stale sweep, showing a phantom pending toggle and burning a
+    // rate-limit slot. Nothing to do, so do nothing.
+    if (newColor === currentColor) return;
 
     setPendingStore(s => {
       if (!s[documentIdx]) s[documentIdx] = {};
       s[documentIdx][arrayIdx] = newColor;
     });
 
-    const cellKey = `${documentIdx}:${arrayIdx}`;
-    const existing = inflightCells.get(cellKey);
-    inflightCells.set(cellKey, {
-      time: existing?.time ?? performance.now(),
-      count: (existing?.count ?? 0) + 1,
-    });
-    setPendingToggleCount((c) => c + 1);
+    // Optimistic count adjustment, tracked per cell so it can be reverted
+    // exactly if the toggle is dropped or rejected.
+    const delta = (newColor > 0 ? 1 : 0) - (currentColor > 0 ? 1 : 0);
+    checkboxState.noteToggle(documentIdx, arrayIdx, newColor, delta);
     if (!inflightGcTimer) inflightGcTimer = window.setTimeout(gcInflightCells, 2000);
 
-    void submitToggle({
-      documentIdx,
-      arrayIdx,
-      color: newColor,
-      previousColor: currentColor,
-    });
+    void submitToggle({ documentIdx, arrayIdx, color: newColor });
   };
 
   const submitToggle = action(async function* (payload: {
     documentIdx: number;
     arrayIdx: number;
     color: number;
-    previousColor: number;
   }) {
-    const { documentIdx, arrayIdx, color, previousColor } = payload;
+    const { documentIdx, arrayIdx, color } = payload;
     try {
       await conn.reducers.toggle({ documentIdx, arrayIdx, color });
       yield;
     } catch {
-      const cellKey = `${documentIdx}:${arrayIdx}`;
-      const inflight = inflightCells.get(cellKey);
-      if (inflight) {
-        const nextCount = inflight.count - 1;
-        setPendingToggleCount((c) => Math.max(0, c - 1));
-        if (nextCount <= 0) {
-          inflightCells.delete(cellKey);
-          if (pendingStore[documentIdx]?.[arrayIdx] === color) {
-            setPendingStore((s) => {
-              if (!s[documentIdx]) return;
-              delete s[documentIdx][arrayIdx];
-              if (Object.keys(s[documentIdx]).length === 0) delete s[documentIdx];
-            });
-          }
-          const wasColored = previousColor > 0;
-          const isColored = color > 0;
-          if (wasColored !== isColored) {
-            setPendingCountDelta((d) => d - (isColored ? 1 : -1));
-          }
-        } else {
-          inflightCells.set(cellKey, { ...inflight, count: nextCount });
-        }
-      }
+      // Roll the cell's optimistic state back as a unit — overlay, pending
+      // counter and count delta together. Any toggle for this cell that did
+      // land is re-counted when its change event arrives.
+      checkboxState.dropInflight(documentIdx, arrayIdx);
       setRateLimited(true);
       clearTimeout(rateLimitFadeTimer);
       rateLimitFadeTimer = window.setTimeout(() => setRateLimited(false), 2000);
     }
   });
+
+  // ── Canvas renderer ──────────────────────────────────────────────────
+  // Painting the pool as sprites costs a few thousand blits with no layout or
+  // style recalc, where the DOM pool costs a class/style write per cell plus a
+  // full recalc — every time startRow moves, which during a scroll is nearly
+  // every frame. The DOM renderer stays as the fallback.
+  let gridCanvas: HTMLCanvasElement | undefined;
+  const [canvasSprites, setCanvasSprites] = createSignal<CellSprites | null>(null);
+  const [canvasFailed, setCanvasFailed] = createSignal(false);
+
+  const useCanvas = () =>
+    urlParams.get("renderer") !== "dom" && !canvasFailed();
+
+  const devicePixelRatioValue = () => window.devicePixelRatio || 1;
+
+  createEffect(
+    () => ({ enabled: useCanvas(), dpr: devicePixelRatioValue() }),
+    ({ enabled, dpr }) => {
+      if (!enabled) return;
+      const sprites = buildCellSprites(PALETTE, CELL_SIZE, dpr);
+      if (!sprites) {
+        setCanvasFailed(true);
+        return;
+      }
+      setCanvasSprites(sprites);
+    },
+  );
+
+  createEffect(
+    () => ({
+      sprites: canvasSprites(),
+      start: startRow(),
+      rows: poolRows(),
+      cols: numColumns(),
+      totalRows: numRows(),
+      // Tracked so board updates repaint; the values themselves are read
+      // untracked inside getCellColor.
+      version: dataVersion(),
+      ready: !loading(),
+    }),
+    ({ sprites, start, rows, cols, totalRows }) => {
+      const canvas = gridCanvas;
+      if (!canvas || !sprites) return;
+
+      const { dpr } = sprites;
+      const width = cols * CELL_SIZE;
+      const height = rows * CELL_SIZE;
+      const backingWidth = Math.round(width * dpr);
+      const backingHeight = Math.round(height * dpr);
+
+      // Resizing the backing store also clears it, so only touch it on change.
+      if (canvas.width !== backingWidth) canvas.width = backingWidth;
+      if (canvas.height !== backingHeight) canvas.height = backingHeight;
+      canvas.style.width = `${width}px`;
+      canvas.style.height = `${height}px`;
+
+      const ctx = canvas.getContext("2d");
+      if (!ctx) {
+        setCanvasFailed(true);
+        return;
+      }
+
+      paintGrid({
+        ctx,
+        sprites,
+        startRow: start,
+        rows,
+        cols,
+        totalRows,
+        numBoxes: NUM_BOXES,
+        numDocuments: NUM_DOCUMENTS,
+        getCellColor,
+      });
+    },
+  );
+
+  /** Map a click on the canvas back to a checkbox and toggle it. */
+  const onCanvasClick = (e: MouseEvent) => {
+    if (loading()) return;
+    const canvas = gridCanvas;
+    if (!canvas) return;
+
+    const rect = canvas.getBoundingClientRect();
+    const col = Math.floor((e.clientX - rect.left) / CELL_SIZE);
+    const localRow = Math.floor((e.clientY - rect.top) / CELL_SIZE);
+    const cols = numColumns();
+    if (col < 0 || col >= cols || localRow < 0 || localRow >= poolRows()) return;
+
+    const rowIdx = startRow() + localRow;
+    if (rowIdx >= numRows()) return;
+
+    const globalIndex = rowIdx * cols + col;
+    if (globalIndex >= NUM_BOXES) return;
+
+    toggle(globalIndex % NUM_DOCUMENTS, Math.floor(globalIndex / NUM_DOCUMENTS));
+  };
+
 
   // ─────────────────────────────────────────────────────────────────────────
   // Render
@@ -745,14 +830,14 @@ export default function App() {
             <For each={PALETTE} keyed={false}>
               {(colorAccessor, i) => (
                 <button
-                  class={`palette-btn ${selectedColor() === i() ? "palette-btn-selected" : "palette-btn-unselected"}`}
-                  onClick={() => setSelectedColor(i())}
-                  title={i() === 0 ? "Clear (uncheck)" : `Color ${i()}`}
+                  class={`palette-btn ${selectedColor() === i ? "palette-btn-selected" : "palette-btn-unselected"}`}
+                  onClick={() => setSelectedColor(i)}
+                  title={i === 0 ? "Clear (uncheck)" : `Color ${i}`}
                   style={{
-                    "background-color": i() === 0 ? "#fff" : colorAccessor(),
+                    "background-color": i === 0 ? "#fff" : colorAccessor(),
                   }}
                 >
-                  {i() === 0 ? "✕" : ""}
+                  {i === 0 ? "✕" : ""}
                 </button>
               )}
             </For>
@@ -824,6 +909,9 @@ export default function App() {
                   class="row-pool"
                   style={{ transform: `translateY(${scrollTop() * (1 - scrollScale()) + startRow() * CELL_SIZE}px)` }}
                 >
+                  <Show
+                    when={useCanvas()}
+                    fallback={
                   <For each={rowPool()} keyed={false}>
                     {(localRow) => {
                       const rowIdx = () => startRow() + localRow();
@@ -871,6 +959,14 @@ export default function App() {
                       );
                     }}
                   </For>
+                    }
+                  >
+                    <canvas
+                      ref={(el: HTMLCanvasElement) => { gridCanvas = el; }}
+                      class={`grid-canvas${loading() ? " grid-canvas-loading" : ""}`}
+                      onClick={onCanvasClick}
+                    />
+                  </Show>
                 </div>
               </div>
             </div>

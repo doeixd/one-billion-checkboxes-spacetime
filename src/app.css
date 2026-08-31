@@ -285,3 +285,13 @@
 .cell-loading {
   cursor: default;
 }
+
+/* ── Canvas grid renderer ──────────────────────────────────────── */
+.grid-canvas {
+  display: block;
+  cursor: pointer;
+}
+
+.grid-canvas-loading {
+  cursor: default;
+}

@@ -24,6 +24,7 @@ const BYTES_PER_DOCUMENT = BOXES_PER_DOCUMENT / 2; // 2000 (4 bits per box, 2 ni
 // --- Change event constants ---
 const PRUNE_AGE_US = 10_000_000n;       // prune change events older than 10 seconds
 const PRUNE_INTERVAL_US = 5_000_000n;   // run prune job every 5 seconds
+const RATE_LIMIT_TTL_US = 3_600_000_000n; // prune inactive rate-limit rows after 1 hour
 
 // --- Game of Life constants ---
 const GOL_COLS = 50;
@@ -478,6 +479,27 @@ export const run_prune_changes = spacetimedb.reducer(
       ctx.db.checkboxChanges.id.delete(id);
     }
 
+    const rateLimitCutoff = ctx.timestamp.microsSinceUnixEpoch - RATE_LIMIT_TTL_US;
+    const identitiesToDelete: Identity[] = [];
+    for (const row of ctx.db.rateLimit.iter()) {
+      if (row.lastToggleAt < rateLimitCutoff) {
+        identitiesToDelete.push(row.identity);
+      }
+    }
+    for (const identity of identitiesToDelete) {
+      ctx.db.rateLimit.identity.delete(identity);
+    }
+
+    const fingerprintsToDelete: string[] = [];
+    for (const row of ctx.db.fingerprintRateLimit.iter()) {
+      if (row.lastToggleAt < rateLimitCutoff) {
+        fingerprintsToDelete.push(row.fingerprint);
+      }
+    }
+    for (const fingerprint of fingerprintsToDelete) {
+      ctx.db.fingerprintRateLimit.fingerprint.delete(fingerprint);
+    }
+
     // Reschedule
     ctx.db.pruneChangesJob.insert({
       scheduledId: 0n,
@@ -889,11 +911,11 @@ export const run_gol_tick = spacetimedb.reducer(
       const rowMask = new Uint8Array(GOL_ROWS);
       for (let i = 1; i < diffLen; i += 3) rowMask[_golDiffBuf[i]] = 1;
 
-        const diffSlice = _golDiffBuf.slice(0, diffLen);
-        nextVersion = sync.version + 1n;
-        golWriteDiffRows(ctx, nextVersion, diffSlice);
-        golSyncRows(ctx, rowMask);
-      }
+      const diffSlice = _golDiffBuf.slice(0, diffLen);
+      nextVersion = sync.version + 1n;
+      golWriteDiffRows(ctx, nextVersion, diffSlice);
+      golSyncRows(ctx, rowMask);
+    }
 
     // 6. Update generation counter and the authoritative full-board snapshot.
     ctx.db.golMeta.id.update({ ...meta, generation: gen });
