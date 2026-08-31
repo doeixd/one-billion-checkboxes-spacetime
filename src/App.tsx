@@ -16,7 +16,6 @@
 import {
   action,
   createSignal,
-  createOptimistic,
   createOptimisticStore,
   createStore,
   createMemo,
@@ -82,7 +81,14 @@ export default function App() {
   const rawBoxes: Record<number, Uint8Array> = {};
 
   const [totalColored, setTotalColored] = createSignal(0n);
-  const [pendingCountDelta, setPendingCountDelta] = createOptimistic(0);
+  // A plain signal, deliberately NOT createOptimistic. Optimistic writes made
+  // inside an action transition auto-revert when it settles, and `toggle` fires
+  // `submitToggle` in the same batch as its own write — so the +1 was being
+  // rolled back on every round-trip. There is nothing to reconcile to either:
+  // `totalColored` only refreshes on the server's 15s stats scan, so the count
+  // visibly reverted and stayed wrong until then. This delta is an accumulator
+  // we own and clear ourselves in upsertStats.
+  const [pendingCountDelta, setPendingCountDelta] = createSignal(0);
   const [statsReady, setStatsReady] = createSignal(false);
 
   // ── Async subscription + grid readiness ──────────────────────────────
